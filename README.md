@@ -1,34 +1,53 @@
 <div align="center">
 
-<img src="https://capsule-render.vercel.app/api?type=venom&height=180&color=0:0d1117,50:1a0533,100:0d1117&text=zygorlap&fontColor=a855f7&fontSize=60&fontAlignY=55&desc=Mohamed%20Amine%20Bahafid%20%2F%2F%20Creative%20Developer&descColor=8b5cf6&descSize=13&descAlignY=78&animation=twinkling" width="100%" />
+<img src="https://capsule-render.vercel.app/api?type=venom&height=200&color=0:0d1117,50:1a0533,100:0d1117&text=zygorlap&fontColor=a855f7&fontSize=65&fontAlignY=55&desc=Mohamed%20Amine%20Bahafid%20%E2%80%94%20Creative%20Developer%20%2F%2F%20Morocco&descColor=8b5cf6&descSize=13&descAlignY=78&animation=twinkling" width="100%" />
 
-<img src="https://readme-typing-svg.demolab.com?font=Press+Start+2P&size=11&duration=3000&pause=1000&color=A855F7&center=true&vCenter=true&width=500&height=50&lines=Creative+Developer+%2F%2F+Morocco;Student+%40+Dahr+El+Mehraz;HTML+%7C+CSS+%7C+JS+%7C+C+%7C+Python" alt="Typing SVG" />
+<br/>
+
+<img src="https://readme-typing-svg.demolab.com?font=Press+Start+2P&size=11&duration=2800&pause=900&color=A855F7&center=true&vCenter=true&width=480&height=45&lines=vibe+coder+%2F%2F+morocco;learning+by+doing;dark+ui+%7C+retro+%7C+creative;dahr+el+mehraz+%E2%80%94+info+appliqu%C3%A9e" alt="typing" />
+
+<br/><br/>
+
+![visitors](https://komarev.com/ghpvc/?username=zygorlap&style=for-the-badge&color=a855f7&label=VISITORS&abbreviated=true)
 
 </div>
+
+<br/>
 
 ---
 
 <div align="center">
 
-```yaml
-name:     Mohamed Amine Bahafid
-alias:    zygorlap
-location: Morocco 🇲🇦
-school:   Dahr El Mehraz — Informatique Appliquée
-status:   Beginner → Builder
-focus:    Web Dev · C · Python · Dark UI
+### who am i
+
+</div>
+
+<div align="center">
+
+```
+  Mohamed Amine Bahafid — zygorlap
+  Student @ Dahr El Mehraz · Informatique Appliquée
+  Morocco · Creative Developer · Vibe Coder
+
+  I don't follow tutorials step by step.
+  I break things, figure them out, and build with feel.
+  Dark interfaces. Pixel energy. Learning every day.
 ```
 
 </div>
 
 ---
 
-**`// STACK //`**
+<div align="center">
+
+### tools i use
+
+</div>
 
 <div align="center">
 
-![HTML5](https://img.shields.io/badge/HTML5-0d1117?style=for-the-badge&logo=html5&logoColor=a855f7)
-![CSS3](https://img.shields.io/badge/CSS3-0d1117?style=for-the-badge&logo=css3&logoColor=a855f7)
+![HTML5](https://img.shields.io/badge/HTML-0d1117?style=for-the-badge&logo=html5&logoColor=a855f7)
+![CSS3](https://img.shields.io/badge/CSS-0d1117?style=for-the-badge&logo=css3&logoColor=a855f7)
 ![JavaScript](https://img.shields.io/badge/JavaScript-0d1117?style=for-the-badge&logo=javascript&logoColor=a855f7)
 ![C](https://img.shields.io/badge/C-0d1117?style=for-the-badge&logo=c&logoColor=a855f7)
 ![Python](https://img.shields.io/badge/Python-0d1117?style=for-the-badge&logo=python&logoColor=a855f7)
@@ -39,45 +58,23 @@ focus:    Web Dev · C · Python · Dark UI
 
 ---
 
-**`// LEARNING //`**
-
 <div align="center">
 
-| Skill | Progress |
-|:------|:---------|
-| HTML | `▓▓▓▓▓▓▓░░░` Active |
-| CSS | `▓▓▓▓▓░░░░░` Active |
-| JavaScript | `▓▓▓░░░░░░░` In Progress |
-| C | `▓▓░░░░░░░░` In Progress |
-| Python | `▓▓░░░░░░░░` Early Stage |
-| Git | `▓▓▓▓░░░░░░` Active |
+### github stats
 
-</div>
+<br/>
 
----
+<img src="https://github-readme-stats.vercel.app/api?username=zygorlap&show_icons=true&bg_color=0d1117&title_color=a855f7&icon_color=8b5cf6&text_color=ffffff&border_color=a855f7&border_radius=8&include_all_commits=true&count_private=true" height="160" />
+&nbsp;
+<img src="https://github-readme-stats.vercel.app/api/top-langs/?username=zygorlap&layout=compact&bg_color=0d1117&title_color=a855f7&text_color=ffffff&border_color=a855f7&border_radius=8&langs_count=6" height="160" />
 
-**`// TERMINAL //`**
+<br/><br/>
 
-```bash
-[zygorlap@zygoros ~]$ whoami
-> Creative developer. Student. Morocco.
-> Learning web dev, C, and Python.
-> Dark UI obsessed. Building every day.
+<img src="https://streak-stats.demolab.com?user=zygorlap&theme=transparent&background=0d1117&ring=a855f7&fire=8b5cf6&currStreakLabel=a855f7&sideNums=ffffff&sideLabels=8b5cf6&dates=888888&border=a855f7&border_radius=8" height="155" />
 
-[zygorlap@zygoros ~]$ echo $STATUS
-> Beginner — not ashamed, just honest.
-```
+<br/><br/>
 
----
-
-**`// STATS //`**
-
-<div align="center">
-
-<img src="https://github-readme-stats.vercel.app/api?username=zygorlap&show_icons=true&bg_color=0d1117&title_color=a855f7&icon_color=8b5cf6&text_color=ffffff&border_color=a855f7&border_radius=6&hide_title=false&rank_icon=github" width="49%" />
-<img src="https://github-readme-stats.vercel.app/api/top-langs/?username=zygorlap&layout=compact&bg_color=0d1117&title_color=a855f7&text_color=ffffff&border_color=a855f7&border_radius=6&langs_count=6" width="49%" />
-
-<img src="https://streak-stats.demolab.com?user=zygorlap&theme=dark&background=0d1117&ring=a855f7&fire=8b5cf6&currStreakLabel=a855f7&sideNums=ffffff&sideLabels=8b5cf6&dates=666666&border=a855f7&border_radius=6" width="60%" />
+<img src="https://github-readme-activity-graph.vercel.app/graph?username=zygorlap&bg_color=0d1117&color=a855f7&line=8b5cf6&point=ffffff&area=true&area_color=1a0533&border_color=a855f7&hide_border=false&radius=8" width="90%" />
 
 </div>
 
@@ -85,12 +82,34 @@ focus:    Web Dev · C · Python · Dark UI
 
 <div align="center">
 
-![](https://komarev.com/ghpvc/?username=zygorlap&style=for-the-badge&color=a855f7&label=VISITORS)
+### currently
+
+</div>
+
+<div align="center">
+
+| | |
+|:--|:--|
+| 🟣 building | first real projects from scratch |
+| 🟣 studying | Informatique Appliquée @ Dahr El Mehraz |
+| 🟡 learning | JavaScript, C, Python |
+| 🔲 next | something people can actually open and use |
+
+</div>
+
+---
+
+<div align="center">
 
 ```
-Morocco · Dahr El Mehraz · Creative Developer · GitHub
-"Every senior dev was once exactly here."
+"build ugly first.
+ make it look good later.
+ just don't stop."
+
+                  — zygorlap
 ```
+
+<br/>
 
 <img src="https://capsule-render.vercel.app/api?type=waving&height=100&color=0:0d1117,50:1a0533,100:0d1117&section=footer" width="100%" />
 
