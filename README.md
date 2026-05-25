@@ -27,11 +27,11 @@
 ```
   Mohamed Amine Bahafid — zygorlap
   Student @ Dahr El Mehraz · Informatique Appliquée
-  Morocco · Creative Developer · Vibe Coder
+  Morocco · Creative Developer · Tmjnin Coder
 
-  I don't follow tutorials step by step.
-  I break things, figure them out, and build with feel.
-  Dark interfaces. Pixel energy. Learning every day.
+  I don't follow tutorials step by step
+  I break things, figure them out, and build with feel
+  
 ```
 
 </div>
