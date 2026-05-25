@@ -60,15 +60,7 @@
 
 <div align="center">
 
-### github stats
-
 <br/>
-
-<img src="https://github-readme-stats.vercel.app/api?username=zygorlap&show_icons=true&bg_color=0d1117&title_color=a855f7&icon_color=8b5cf6&text_color=ffffff&border_color=a855f7&border_radius=8&include_all_commits=true&count_private=true" height="160" />
-&nbsp;
-<img src="https://github-readme-stats.vercel.app/api/top-langs/?username=zygorlap&layout=compact&bg_color=0d1117&title_color=a855f7&text_color=ffffff&border_color=a855f7&border_radius=8&langs_count=6" height="160" />
-
-<br/><br/>
 
 <img src="https://streak-stats.demolab.com?user=zygorlap&theme=transparent&background=0d1117&ring=a855f7&fire=8b5cf6&currStreakLabel=a855f7&sideNums=ffffff&sideLabels=8b5cf6&dates=888888&border=a855f7&border_radius=8" height="155" />
 
