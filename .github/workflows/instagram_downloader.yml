@@ -1,64 +1,70 @@
-name: Bulk Download Instagram Content
+name: Pro Instagram Downloader (Proxy Enabled)
 
 on:
-  # Allows you to manually trigger this run from the Actions tab
   workflow_dispatch:
     inputs:
-      target_username:
-        description: 'The Instagram username to download (Public profiles only)'
+      profile_link:
+        description: 'Instagram Profile Link (e.g., https://www.instagram.com/akvenice_sw/)'
         required: true
         type: string
-      download_reels:
-        description: 'Download Reels/IGTV as well?'
-        required: true
-        type: boolean
-        default: true
+
+permissions:
+  contents: write 
 
 jobs:
-  download-instagram:
+  download-and-commit:
     runs-on: ubuntu-latest
 
     steps:
-    # Step 1: Check out the repository
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    # Step 2: Set up Python
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-python-version: '3.10'
+        python-version: '3.10'
 
-    # Step 3: Install Instaloader
     - name: Install Instaloader
       run: |
         python -m pip install --upgrade pip
         pip install instaloader
 
-    # Step 4: Run the Scraper
-    - name: Download Profile Media
+    - name: Extract Username
+      id: extract
       run: |
-        # Base command for downloading a public profile
-        # --no-captions and --no-metadata-json are added to save space, remove them if you want text data
-        COMMAND="instaloader --no-captions --no-metadata-json"
-        
-        # Check if user wants reels included
-        if [ "${{ inputs.download_reels }}" = "true" ]; then
-          COMMAND="$COMMAND --reels --igtv"
+        LINK="${{ inputs.profile_link }}"
+        CLEAN_LINK=$(echo "$LINK" | awk -F'?' '{print $1}' | sed 's:/*$::')
+        USERNAME=$(echo "$CLEAN_LINK" | awk -F'/' '{print $NF}')
+        echo "USERNAME=$USERNAME" >> $GITHUB_ENV
+
+    - name: Download Media via Residential Proxy
+      env:
+        # This securely pulls your proxy credentials from GitHub Secrets
+        HTTP_PROXY: ${{ secrets.IG_PROXY_URL }}
+        HTTPS_PROXY: ${{ secrets.IG_PROXY_URL }}
+      run: |
+        if [ -z "$HTTPS_PROXY" ]; then
+          echo "ERROR: No proxy configured. Instagram will likely block this runner (403 Forbidden)."
+          echo "Please add IG_PROXY_URL to your GitHub Repository Secrets."
+          exit 1
         fi
         
-        # Execute the download command targeting the input username
-        $COMMAND "${{ inputs.target_username }}"
+        echo "Proxy detected. Initiating download for ${USERNAME}..."
+        instaloader --no-captions --no-metadata-json --reels --igtv "${USERNAME}"
 
-    # Step 5: Zip the downloaded content so it can be exported easily
-    - name: Zip Downloaded Content
+    - name: Commit and Push to Repository
       run: |
-        zip -r instagram_media.zip "${{ inputs.target_username }}"/
-
-    # Step 6: Upload the files as a GitHub Artifact
-    - name: Upload Media Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ inputs.target_username }}-instagram-backup
-        path: instagram_media.zip
-        retention-days: 5
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        
+        # Stage the new directory
+        git add "${USERNAME}/"
+        
+        # Check for changes and commit if files exist
+        if git diff-index --quiet HEAD; then
+          echo "No new media found to commit."
+        else
+          git commit -m "chore: auto-downloaded content for ${USERNAME}"
+          git push origin HEAD
+          echo "Successfully pushed new media to the repository."
+        fi
