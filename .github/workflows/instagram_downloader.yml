@@ -1,14 +1,14 @@
-name: Free Bulk Reels Downloader (Public Accounts)
+name: Free Instagram Posts & Reels Downloader
 
 on:
   workflow_dispatch:
     inputs:
-      profile_url:
-        description: 'Public Instagram profile URL (e.g., https://www.instagram.com/akvenice_sw/)'
+      profile_link:
+        description: 'Public profile URL (e.g., https://www.instagram.com/akvenice_sw/)'
         required: true
         type: string
-      max_reels:
-        description: 'Max reels to download (leave 0 for all)'
+      max_posts:
+        description: 'Max posts to download (0 = all)'
         default: '0'
         required: false
 
@@ -16,159 +16,233 @@ permissions:
   contents: write
 
 jobs:
-  download-reels:
+  download:
     runs-on: ubuntu-latest
-    timeout-minutes: 120   # long timeout for retries
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq curl
+        run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Install yt-dlp
+      - name: Install Python tools
         run: |
           python -m pip install --upgrade pip
-          pip install yt-dlp
+          pip install instaloader yt-dlp requests
 
-      - name: Extract username
+      - name: Extract username safely
+        id: extract
         run: |
-          url="${{ inputs.profile_url }}"
-          username=$(echo "$url" | awk -F'?' '{print $1}' | sed 's:/*$::' | awk -F'/' '{print $NF}')
+          # Remove query parameters and trailing slashes, then take last segment
+          url="${{ inputs.profile_link }}"
+          clean=$(echo "$url" | sed -E 's/[?#].*//; s/\/$//')
+          username=$(basename "$clean")
           echo "USERNAME=$username" >> $GITHUB_ENV
+          echo "Using username: $username"
 
-      - name: Create downloader script
+      # ----------------------------------------------------------------
+      # 1. Get list of post shortcodes using instaloader + free proxy
+      # ----------------------------------------------------------------
+      - name: Fetch post list with proxy rotation
+        env:
+          MAX_POSTS: ${{ inputs.max_posts }}
         run: |
-          cat << 'PYEOF' > download_reels.py
-          import os, subprocess, random, time, json, sys, re
+          cat << 'PYEOF' > fetch_posts.py
+          import os, sys, random, time, json, subprocess, re
           from urllib.request import urlopen, Request
 
           USERNAME = os.environ["USERNAME"]
-          MAX_REELS = int(os.environ.get("MAX_REELS", "0")) or None
-          OUTPUT_DIR = USERNAME
+          MAX_POSTS = int(os.environ.get("MAX_POSTS", "0")) or None
 
-          # ---- 1. Try to get fresh free proxies ----
-          def fetch_proxies():
-              proxies = set()
-              # Try multiple free proxy APIs (only HTTPS for security)
-              apis = [
-                  "https://proxylist.geonode.com/api/proxy-list?limit=10&page=1&sort_by=lastChecked&sort_type=desc&protocols=https",
-                  "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=https&timeout=10000&country=all&ssl=all&anonymity=all",
-                  # Add more if needed; these often give IP:port lists
-              ]
-              for api in apis:
-                  try:
-                      req = Request(api, headers={"User-Agent": "Mozilla/5.0"})
-                      data = urlopen(req, timeout=10).read().decode()
-                      # Parse Geonode JSON
-                      if "proxylist.geonode.com" in api:
-                          jdata = json.loads(data)
-                          for p in jdata.get("data", []):
-                              if p.get("protocols") and "https" in p["protocols"]:
-                                  proxies.add(f"https://{p['ip']}:{p['port']}")
-                      else:
-                          # plain text list, each line ip:port
-                          lines = data.strip().split("\n")
-                          for line in lines:
-                              line = line.strip()
-                              if line and not line.startswith("#"):
-                                  proxies.add(f"https://{line}")
-                  except Exception as e:
-                      print(f"Failed to fetch from {api}: {e}")
-              return list(proxies)
-
-          # ---- 2. Test a proxy quickly ----
-          def test_proxy(proxy):
+          # ---- Scrape fresh free proxies (https only) ----
+          def get_proxies():
+              proxies = []
               try:
-                  # Use yt-dlp to test connectivity to Instagram
-                  cmd = ["yt-dlp", "--proxy", proxy, "--max-downloads", "1",
-                         "-s",  # simulate only
-                         "--sleep-requests", "1", "--sleep-interval", "1",
-                         "https://www.instagram.com/p/", "-o", "/dev/null"]
-                  result = subprocess.run(cmd, capture_output=True, timeout=30)
-                  return result.returncode == 0
-              except:
-                  return False
+                  req = Request("https://proxylist.geonode.com/api/proxy-list?limit=10&page=1&sort_by=lastChecked&sort_type=desc&protocols=https",
+                                headers={"User-Agent": "Mozilla/5.0"})
+                  data = json.loads(urlopen(req, timeout=10).read())
+                  for p in data.get("data", []):
+                      if "https" in p.get("protocols", []):
+                          proxies.append(f"http://{p['ip']}:{p['port']}")
+              except: pass
+              try:
+                  req = Request("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=https&timeout=5000&country=all&ssl=all&anonymity=all",
+                                headers={"User-Agent": "Mozilla/5.0"})
+                  raw = urlopen(req, timeout=10).read().decode()
+                  for line in raw.strip().split("\n"):
+                      line = line.strip()
+                      if line and not line.startswith("#"):
+                          proxies.append(f"http://{line}")
+              except: pass
+              random.shuffle(proxies)
+              return proxies
 
-          # ---- 3. Download reels using a working proxy ----
-          def download_with_proxy(proxy):
+          # ---- Try to get post shortcodes via instaloader (uses proxy env vars) ----
+          def get_shortcodes(proxy):
+              env = os.environ.copy()
+              env["HTTP_PROXY"] = proxy
+              env["HTTPS_PROXY"] = proxy
+              # instaloader command: print shortcodes without downloading
+              cmd = [
+                  "instaloader", "--no-captions", "--no-metadata-json",
+                  "--no-video-thumbnails", "--no-pictures", "--no-videos",
+                  "--quiet", "--post-filter", "None",
+                  "--", USERNAME, "+", "pretty_print", "|", "grep", "-oP", "'(?:https://www\.instagram\.com/p/)\K[^/]+'",
+                  ">", "shortcodes.txt"
+              ]
+              # Simpler: use Python API
+              try:
+                  import instaloader
+                  loader = instaloader.Instaloader(
+                      download_pictures=False, download_videos=False,
+                      download_video_thumbnails=False, save_metadata=False,
+                      max_connection_attempts=2, request_timeout=30
+                  )
+                  loader.context._session.proxies.update({
+                      "http": proxy, "https": proxy
+                  })
+                  profile = instaloader.Profile.from_username(loader.context, USERNAME)
+                  codes = []
+                  for post in profile.get_posts():
+                      if MAX_POSTS and len(codes) >= MAX_POSTS:
+                          break
+                      codes.append(post.shortcode)
+                  return codes
+              except Exception as e:
+                  print(f"instaloader failed with proxy {proxy}: {e}")
+                  return None
+
+          # ---- Main ----
+          proxies = get_proxies()
+          codes = None
+          for proxy in proxies + [""]:   # also try direct
+              print(f"Trying proxy: {proxy or 'direct'}")
+              codes = get_shortcodes(proxy)
+              if codes:
+                  break
+              time.sleep(random.uniform(2,5))
+          if not codes:
+              print("Could not fetch any post list. Exiting.")
+              sys.exit(1)
+          with open("shortcodes.txt", "w") as f:
+              for c in codes:
+                  f.write(c + "\n")
+          print(f"Saved {len(codes)} shortcodes.")
+          PYEOF
+          python fetch_posts.py
+
+      # ----------------------------------------------------------------
+      # 2. Download each post using yt-dlp with free proxy rotation
+      # ----------------------------------------------------------------
+      - name: Download media with yt-dlp
+        run: |
+          cat << 'PYEOF' > download_media.py
+          import os, random, time, subprocess, sys, json
+          from urllib.request import urlopen, Request
+
+          USERNAME = os.environ["USERNAME"]
+          OUTPUT = USERNAME
+          os.makedirs(OUTPUT, exist_ok=True)
+
+          # read shortcodes
+          with open("shortcodes.txt") as f:
+              codes = [l.strip() for l in f if l.strip()]
+
+          if not codes:
+              print("No shortcodes to download.")
+              sys.exit(0)
+
+          # free proxy fetcher (same as before)
+          def get_proxies():
+              proxies = []
+              try:
+                  req = Request("https://proxylist.geonode.com/api/proxy-list?limit=10&page=1&sort_by=lastChecked&sort_type=desc&protocols=https",
+                                headers={"User-Agent": "Mozilla/5.0"})
+                  data = json.loads(urlopen(req, timeout=10).read())
+                  for p in data.get("data", []):
+                      if "https" in p.get("protocols", []):
+                          proxies.append(f"http://{p['ip']}:{p['port']}")
+              except: pass
+              try:
+                  req = Request("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=https&timeout=5000&country=all&ssl=all&anonymity=all",
+                                headers={"User-Agent": "Mozilla/5.0"})
+                  raw = urlopen(req, timeout=10).read().decode()
+                  for line in raw.strip().split("\n"):
+                      line = line.strip()
+                      if line and not line.startswith("#"):
+                          proxies.append(f"http://{line}")
+              except: pass
+              random.shuffle(proxies)
+              return proxies
+
+          proxies_pool = get_proxies()
+
+          # Download function with yt-dlp
+          def download_post(shortcode, proxy=None):
+              url = f"https://www.instagram.com/p/{shortcode}/"
               cmd = [
                   "yt-dlp",
-                  "--proxy", proxy,
-                  "--extract-audio", "--audio-format", "mp3",  # optional: grab audio only? No, keep video
-                  "--format", "bestvideo+bestaudio/best",  # highest quality
-                  "--output", f"{OUTPUT_DIR}/%(upload_date)s_%(id)s.%(ext)s",
-                  "--no-playlist",
-                  "--sleep-requests", str(random.uniform(1, 3)),
-                  "--sleep-interval", str(random.uniform(1, 3)),
-                  "--max-sleep-interval", "10",
+                  "--quiet",
+                  "--no-warnings",
+                  "--output", f"{OUTPUT}/%(upload_date)s_%(id)s.%(ext)s",
+                  "--download-archive", f"{OUTPUT}/archive.txt",
+                  "--merge-output-format", "mp4",
                   "--user-agent", random.choice([
                       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-                      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+                      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
                   ]),
-                  "--download-archive", f"{OUTPUT_DIR}/archive.txt",  # skip duplicates
+                  url
               ]
-              if MAX_REELS:
-                  cmd += ["--max-downloads", str(MAX_REELS)]
-              cmd += [f"https://www.instagram.com/{USERNAME}/reels/"]  # Instagram reels tab
-              print(f"Trying proxy: {proxy}")
-              subprocess.run(cmd, timeout=600)  # 10 minutes
+              if proxy:
+                  cmd.insert(1, "--proxy")
+                  cmd.insert(2, proxy)
+              result = subprocess.run(cmd, capture_output=True, timeout=120)
+              if result.returncode != 0:
+                  err = result.stderr.decode().strip()
+                  print(f"  Failed: {shortcode} ({err[:80]})")
+                  return False
               return True
 
-          # ---- Main logic ----
-          os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-          # First, try without proxy (probably fails but who knows)
-          print("Attempting direct connection (likely to fail)...")
-          try:
-              download_with_proxy("")  # empty string = no proxy
-              print("Amazing! Direct connection worked.")
-          except:
-              print("Direct connection failed. Fetching free proxies...")
-              proxies = fetch_proxies()
-              if not proxies:
-                  print("No free proxies found. Exiting.")
-                  sys.exit(1)
-              random.shuffle(proxies)
-              for proxy in proxies:
-                  print(f"Testing proxy: {proxy}")
-                  if test_proxy(proxy):
-                      print(f"Proxy {proxy} seems alive. Trying download...")
-                      try:
-                          download_with_proxy(proxy)
-                          print(f"Success with proxy {proxy}")
-                          break
-                      except Exception as e:
-                          print(f"Proxy {proxy} failed: {e}")
-                          continue
-                  else:
-                      print(f"Proxy {proxy} is dead.")
-              else:
-                  print("All proxies failed. No reels downloaded.")
+          # Loop with proxy rotation
+          for i, code in enumerate(codes):
+              print(f"Downloading {i+1}/{len(codes)}: {code}")
+              success = False
+              # Try a few proxies
+              for proxy in random.sample(proxies_pool, min(3, len(proxies_pool))):
+                  if download_post(code, proxy):
+                      success = True
+                      break
+                  time.sleep(random.uniform(2,5))
+              if not success:
+                  # last attempt without proxy
+                  if download_post(code, None):
+                      success = True
+              if not success:
+                  print(f"  Gave up on {code}")
+              time.sleep(random.uniform(3,7))   # human delay
           PYEOF
+          python download_media.py
 
-      - name: Run the downloader
-        env:
-          MAX_REELS: ${{ inputs.max_reels }}
-        run: python download_reels.py
-
-      - name: Commit any downloaded reels
+      # ----------------------------------------------------------------
+      # 3. Commit everything to repo
+      # ----------------------------------------------------------------
+      - name: Commit and push
         if: always()
         run: |
           if [ ! -d "$USERNAME" ]; then
-            echo "No directory for $USERNAME found. Nothing to commit."
+            echo "No output directory. Exiting."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$USERNAME/"
-          # Don't commit the archive file
-          git reset -- "$USERNAME/archive.txt" 2>/dev/null
+          git reset -- "$USERNAME/archive.txt" 2>/dev/null || true
           if git diff-index --quiet HEAD; then
-            echo "No new reels to commit."
+            echo "No new files to commit."
           else
-            git commit -m "Download reels for $USERNAME [$(date +%Y-%m-%d)]"
+            git commit -m "Download posts for $USERNAME [$(date +%F)]"
             git push origin HEAD
+            echo "✅ Media pushed to repo!"
           fi
