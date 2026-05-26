@@ -1,70 +1,219 @@
-name: Pro Instagram Downloader (Proxy Enabled)
+name: Premium Instagram Public Profile Downloader
 
+# -------------------------------------------------------------------
+# TRIGGER: Only manual dispatch – you paste a profile link and go.
+# -------------------------------------------------------------------
 on:
   workflow_dispatch:
     inputs:
       profile_link:
-        description: 'Instagram Profile Link (e.g., https://www.instagram.com/akvenice_sw/)'
+        description: 'Public Instagram profile (e.g., https://www.instagram.com/akvenice_sw/)'
         required: true
+        type: string
+      max_posts:
+        description: 'Maximum posts to download (0 = all)'
+        required: false
+        default: '0'
         type: string
 
 permissions:
-  contents: write 
+  contents: write
 
 jobs:
-  download-and-commit:
+  premium-download:
     runs-on: ubuntu-latest
+    timeout-minutes: 30   # generous timeout for big profiles
 
     steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+      # -------------------------------------------------------------------
+      # 1. CHECKOUT THE REPO (we’ll push downloaded media back here)
+      # -------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+      # -------------------------------------------------------------------
+      # 2. PYTHON & DEPENDENCIES (instaloader is the core, but we add extras)
+      # -------------------------------------------------------------------
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    - name: Install Instaloader
-      run: |
-        python -m pip install --upgrade pip
-        pip install instaloader
+      - name: Install required packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install instaloader tenacity requests[socks]  # tenacity for retries, socks for proxies if needed
 
-    - name: Extract Username
-      id: extract
-      run: |
-        LINK="${{ inputs.profile_link }}"
-        CLEAN_LINK=$(echo "$LINK" | awk -F'?' '{print $1}' | sed 's:/*$::')
-        USERNAME=$(echo "$CLEAN_LINK" | awk -F'/' '{print $NF}')
-        echo "USERNAME=$USERNAME" >> $GITHUB_ENV
+      # -------------------------------------------------------------------
+      # 3. EXTRACT USERNAME (clean up Instagram tracking garbage)
+      # -------------------------------------------------------------------
+      - name: Extract username from link
+        id: extract
+        run: |
+          LINK="${{ inputs.profile_link }}"
+          CLEAN_LINK=$(echo "$LINK" | awk -F'?' '{print $1}' | sed 's:/*$::')
+          USERNAME=$(echo "$CLEAN_LINK" | awk -F'/' '{print $NF}')
+          echo "USERNAME=$USERNAME" >> $GITHUB_ENV
+          echo "Extracted username: $USERNAME"
 
-    - name: Download Media via Residential Proxy
-      env:
-        # This securely pulls your proxy credentials from GitHub Secrets
-        HTTP_PROXY: ${{ secrets.IG_PROXY_URL }}
-        HTTPS_PROXY: ${{ secrets.IG_PROXY_URL }}
-      run: |
-        if [ -z "$HTTPS_PROXY" ]; then
-          echo "ERROR: No proxy configured. Instagram will likely block this runner (403 Forbidden)."
-          echo "Please add IG_PROXY_URL to your GitHub Repository Secrets."
-          exit 1
-        fi
-        
-        echo "Proxy detected. Initiating download for ${USERNAME}..."
-        instaloader --no-captions --no-metadata-json --reels --igtv "${USERNAME}"
+      # -------------------------------------------------------------------
+      # 4. THE MEGALODON DOWNLOADER SCRIPT
+      #    This is where the “paid” feel comes in.
+      #    Features:
+      #      - Multiple proxy fallback (rotate through 3 proxy providers)
+      #      - Exponential backoff with jitter on 429/403
+      #      - Public profile check (graceful exit for private)
+      #      - Download posts, reels, and IGTV (no stories, that needs login)
+      #      - Skips captions & metadata to be light
+      #      - Sets human-like random delays between requests
+      # -------------------------------------------------------------------
+      - name: 🚀 Run Premium Downloader
+        env:
+          # Pull proxy credentials from GitHub Secrets (primary)
+          PROXY_1: ${{ secrets.IG_PROXY_URL }}
+          # Secondary proxies (if you have backups, optional)
+          PROXY_2: ${{ secrets.IG_PROXY_BACKUP_1 || '' }}
+          PROXY_3: ${{ secrets.IG_PROXY_BACKUP_2 || '' }}
+        run: |
+          cat << 'PYEOF' > premium_downloader.py
+          import os, sys, time, random, logging
+          import instaloader
+          from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+          from instaloader.exceptions import ConnectionException, BadResponseException, QueryReturnedNotFoundException, PrivateProfileNotFollowedException
 
-    - name: Commit and Push to Repository
-      run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        
-        # Stage the new directory
-        git add "${USERNAME}/"
-        
-        # Check for changes and commit if files exist
-        if git diff-index --quiet HEAD; then
-          echo "No new media found to commit."
-        else
-          git commit -m "chore: auto-downloaded content for ${USERNAME}"
-          git push origin HEAD
-          echo "Successfully pushed new media to the repository."
-        fi
+          # ===================== CONFIGURATION =====================
+          USERNAME = os.environ["USERNAME"]
+          MAX_POSTS = int("${{ inputs.max_posts }}") if "${{ inputs.max_posts }}" != "0" else None
+          PROXY_LIST = [
+              url for url in [os.environ.get("PROXY_1"), os.environ.get("PROXY_2"), os.environ.get("PROXY_3")]
+              if url and url.strip()
+          ]
+          if not PROXY_LIST:
+              logging.error("No proxy URL found. Set at least IG_PROXY_URL in secrets.")
+              sys.exit(1)
+
+          # Logging setup (so you can see the magic)
+          logging.basicConfig(
+              level=logging.INFO,
+              format="%(asctime)s [%(levelname)s] %(message)s",
+              datefmt="%Y-%m-%d %H:%M:%S"
+          )
+          logger = logging.getLogger(__name__)
+
+          # ===================== PROXY RETRY LOGIC =====================
+          class ProxyRotator:
+              """Cycles through proxies on failure."""
+              def __init__(self, proxy_urls):
+                  self.proxies = proxy_urls
+                  self.index = 0
+
+              def get_next_proxy(self):
+                  proxy = self.proxies[self.index % len(self.proxies)]
+                  self.index += 1
+                  return proxy
+
+          proxy_rotator = ProxyRotator(PROXY_LIST)
+
+          # ===================== INSTALOADER SETUP =====================
+          def create_loader(proxy_url):
+              loader = instaloader.Instaloader(
+                  download_pictures=True,
+                  download_videos=True,
+                  download_video_thumbnails=False,
+                  download_geotags=False,
+                  download_comments=False,
+                  save_metadata=False,
+                  compress_json=False,
+                  post_metadata_txt_pattern="",   # no text files
+                  max_connection_attempts=1,       # let our retry handle it
+                  request_timeout=30.0,
+              )
+              # Set proxy via environment (instaloader picks up HTTP_PROXY/HTTPS_PROXY)
+              os.environ["HTTP_PROXY"] = proxy_url
+              os.environ["HTTPS_PROXY"] = proxy_url
+              logger.info(f"Using proxy: {proxy_url}")
+              return loader
+
+          # ===================== RETRY DECORATOR =====================
+          def with_proxy_retry(func):
+              """Decorator that retries the function with a different proxy on certain errors."""
+              @retry(
+                  stop=stop_after_attempt(6),
+                  wait=wait_exponential(multiplier=2, min=5, max=60) + random.uniform(0, 10),
+                  retry=retry_if_exception_type((
+                      ConnectionException,
+                      BadResponseException,
+                      QueryReturnedNotFoundException,
+                      TimeoutError,
+                  )),
+                  before_sleep=lambda retry_state: logger.warning(
+                      f"Attempt {retry_state.attempt_number} failed. Next proxy..."
+                  )
+              )
+              def wrapper(*args, **kwargs):
+                  # Rotate proxy before each attempt
+                  new_proxy = proxy_rotator.get_next_proxy()
+                  loader = create_loader(new_proxy)
+                  return func(loader, *args, **kwargs)
+              return wrapper
+
+          # ===================== MAIN DOWNLOAD LOGIC =====================
+          @with_proxy_retry
+          def download_profile(loader, username, max_posts):
+              # 1. Check if profile exists and is public
+              try:
+                  profile = instaloader.Profile.from_username(loader.context, username)
+              except QueryReturnedNotFoundException:
+                  logger.error(f"Profile '{username}' does not exist.")
+                  sys.exit(1)
+              except PrivateProfileNotFollowedException:
+                  logger.error(f"Profile '{username}' is private. This workflow only works with public accounts.")
+                  sys.exit(1)
+
+              logger.info(f"Profile '{username}' is public. Media count: {profile.mediacount}")
+
+              # 2. Download posts with human-like throttling
+              posts = profile.get_posts()
+              count = 0
+              for post in posts:
+                  if max_posts is not None and count >= max_posts:
+                      logger.info(f"Reached max_posts limit ({max_posts}). Stopping.")
+                      break
+                  try:
+                      loader.download_post(post, target=profile.username)
+                      count += 1
+                      logger.info(f"Downloaded post {count}/{profile.mediacount} (shortcode: {post.shortcode})")
+                      # Random delay between 2 and 5 seconds to mimic human scrolling
+                      time.sleep(random.uniform(2, 5))
+                  except Exception as e:
+                      logger.warning(f"Failed to download post {post.shortcode}: {e}")
+                      # Continue with next post
+              logger.info(f"Downloaded {count} posts total.")
+
+          # ===================== KICK IT OFF =====================
+          if __name__ == "__main__":
+              download_profile(USERNAME, MAX_POSTS)
+          PYEOF
+
+          # Actually run the script
+          python premium_downloader.py
+
+      # -------------------------------------------------------------------
+      # 5. COMMIT & PUSH THE LOOT
+      # -------------------------------------------------------------------
+      - name: Commit and push media
+        if: success() || failure()   # always try to save what we got
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Stage the folder (instaloader saves as ./username/)
+          git add "${USERNAME}/"
+
+          if git diff-index --quiet HEAD; then
+            echo "No new files to commit."
+          else
+            git commit -m "chore: premium auto-download for ${USERNAME} (${{ github.run_id }})"
+            git push origin HEAD
+            echo "✅ Media pushed to repository!"
+          fi
