@@ -1,286 +1,174 @@
-name: Mega Premium Instagram Scraper (No Login)
+name: Free Bulk Reels Downloader (Public Accounts)
 
-# -------------------------------------------------------------------
-# TRIGGER
-# -------------------------------------------------------------------
 on:
   workflow_dispatch:
     inputs:
-      profile_link:
-        description: 'Public profile URL (e.g., https://www.instagram.com/akvenice_sw/)'
+      profile_url:
+        description: 'Public Instagram profile URL (e.g., https://www.instagram.com/akvenice_sw/)'
         required: true
         type: string
-      max_posts:
-        description: 'Max posts to download (0 = all)'
-        required: false
+      max_reels:
+        description: 'Max reels to download (leave 0 for all)'
         default: '0'
-        type: string
-      organize_by_date:
-        description: 'Organize into YYYY-MM-DD folders? (true/false)'
         required: false
-        default: 'false'
-        type: string
 
 permissions:
   contents: write
 
 jobs:
-  mega-scrape:
+  download-reels:
     runs-on: ubuntu-latest
-    timeout-minutes: 60   # for large profiles
+    timeout-minutes: 120   # long timeout for retries
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq curl
 
-      - name: Install dependencies
+      - name: Install yt-dlp
         run: |
           python -m pip install --upgrade pip
-          pip install instaloader tenacity requests
+          pip install yt-dlp
 
       - name: Extract username
-        id: extract
         run: |
-          LINK="${{ inputs.profile_link }}"
-          CLEAN=$(echo "$LINK" | awk -F'?' '{print $1}' | sed 's:/*$::')
-          USERNAME=$(echo "$CLEAN" | awk -F'/' '{print $NF}')
-          echo "USERNAME=$USERNAME" >> $GITHUB_ENV
+          url="${{ inputs.profile_url }}"
+          username=$(echo "$url" | awk -F'?' '{print $1}' | sed 's:/*$::' | awk -F'/' '{print $NF}')
+          echo "USERNAME=$username" >> $GITHUB_ENV
 
-      # -------------------------------------------------------------------
-      # 🔥 THE BEAST – custom Python script (550+ lines of smartness)
-      # -------------------------------------------------------------------
-      - name: Run Premium Instagram Downloader
-        env:
-          # Primary proxy (MANDATORY)
-          PROXY_1: ${{ secrets.IG_PROXY_URL }}
-          # Optional backups (up to 5 total)
-          PROXY_2: ${{ secrets.IG_PROXY_BACKUP_1 || '' }}
-          PROXY_3: ${{ secrets.IG_PROXY_BACKUP_2 || '' }}
-          PROXY_4: ${{ secrets.IG_PROXY_BACKUP_3 || '' }}
-          PROXY_5: ${{ secrets.IG_PROXY_BACKUP_4 || '' }}
-          # Settings from inputs
-          MAX_POSTS: ${{ inputs.max_posts }}
-          ORGANIZE_BY_DATE: ${{ inputs.organize_by_date }}
+      - name: Create downloader script
         run: |
-          cat << 'PYEOF' > mega_scraper.py
-          import os, sys, time, random, logging, json, hashlib
-          from datetime import datetime
-          from pathlib import Path
-          import instaloader
-          from tenacity import (
-              retry, stop_after_attempt, wait_exponential,
-              retry_if_exception_type, before_sleep_log
-          )
-          from instaloader.exceptions import (
-              ConnectionException, BadResponseException,
-              QueryReturnedNotFoundException, PrivateProfileNotFollowedException,
-              LoginRequiredException
-          )
+          cat << 'PYEOF' > download_reels.py
+          import os, subprocess, random, time, json, sys, re
+          from urllib.request import urlopen, Request
 
-          # ================== CONFIGURATION ==================
           USERNAME = os.environ["USERNAME"]
-          MAX_POSTS = int(os.getenv("MAX_POSTS", "0")) or None
-          ORGANIZE_BY_DATE = os.getenv("ORGANIZE_BY_DATE", "false").lower() == "true"
+          MAX_REELS = int(os.environ.get("MAX_REELS", "0")) or None
+          OUTPUT_DIR = USERNAME
 
-          # Collect all proxy URLs (empty strings will be filtered out)
-          PROXY_LIST = []
-          for i in range(1, 6):
-              p = os.environ.get(f"PROXY_{i}", "").strip()
-              if p and p != "":
-                  PROXY_LIST.append(p)
-
-          if not PROXY_LIST:
-              logging.error("❌ No proxy configured! Add IG_PROXY_URL to GitHub Secrets.")
-              sys.exit(1)
-
-          # Logging
-          logging.basicConfig(
-              level=logging.INFO,
-              format="%(asctime)s [%(levelname)s] %(message)s",
-              datefmt="%Y-%m-%d %H:%M:%S"
-          )
-          logger = logging.getLogger("MegaScraper")
-
-          # ================== USER AGENT ROTATION ==================
-          USER_AGENTS = [
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-              "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-              "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-              "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-          ]
-
-          def random_ua():
-              return random.choice(USER_AGENTS)
-
-          # ================== PROXY ROTATOR ==================
-          class ProxyRotator:
-              def __init__(self, proxy_urls):
-                  self.proxies = proxy_urls
-                  self.idx = 0
-
-              def next(self):
-                  proxy = self.proxies[self.idx % len(self.proxies)]
-                  self.idx += 1
-                  return proxy
-
-          proxy_rotator = ProxyRotator(PROXY_LIST)
-
-          # ================== INSTALOADER BUILDER ==================
-          def create_loader(proxy_url):
-              """Create a fresh Instaloader instance with proxy and random UA."""
-              loader = instaloader.Instaloader(
-                  download_pictures=True,
-                  download_videos=True,
-                  download_video_thumbnails=False,
-                  download_geotags=False,
-                  download_comments=False,
-                  save_metadata=False,
-                  compress_json=False,
-                  post_metadata_txt_pattern="",
-                  max_connection_attempts=2,
-                  request_timeout=45.0,
-              )
-              # Set proxy via environment (instaloader uses requests)
-              os.environ["HTTP_PROXY"] = proxy_url
-              os.environ["HTTPS_PROXY"] = proxy_url
-              # Set random user agent
-              loader.context._session.headers.update({"User-Agent": random_ua()})
-              logger.info(f"🌀 Switched to proxy: {proxy_url[:50]}... | UA: {loader.context._session.headers.get('User-Agent')[:60]}")
-              return loader
-
-          # ================== DOWNLOAD HISTORY (incremental) ==================
-          HISTORY_FILE = Path(f"{USERNAME}/.download_history.json")
-
-          def load_history():
-              if HISTORY_FILE.exists():
-                  with open(HISTORY_FILE, "r") as f:
-                      return json.load(f)
-              return []
-
-          def save_history(shortcodes):
-              HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-              with open(HISTORY_FILE, "w") as f:
-                  json.dump(shortcodes, f)
-
-          # ================== RETRY DECORATOR WITH PROXY ROTATION ==================
-          def with_retry_and_proxy_rotation(func):
-              @retry(
-                  stop=stop_after_attempt(8),
-                  wait=wait_exponential(multiplier=2, min=5, max=90) + random.uniform(1, 10),
-                  retry=retry_if_exception_type((
-                      ConnectionException,
-                      BadResponseException,
-                      TimeoutError,
-                      ConnectionError,
-                  )),
-                  before_sleep=before_sleep_log(logger, logging.WARNING)
-              )
-              def wrapper(*args, **kwargs):
-                  new_proxy = proxy_rotator.next()
-                  loader = create_loader(new_proxy)
-                  return func(loader, *args, **kwargs)
-              return wrapper
-
-          # ================== CORE DOWNLOAD LOGIC ==================
-          @with_retry_and_proxy_rotation
-          def download_profile(loader, username, max_posts, organize_by_date):
-              # 1. Check if public
-              try:
-                  profile = instaloader.Profile.from_username(loader.context, username)
-              except QueryReturnedNotFoundException:
-                  logger.error(f"Profile '{username}' not found.")
-                  sys.exit(1)
-              except PrivateProfileNotFollowedException:
-                  logger.error(f"Profile '{username}' is PRIVATE. This scraper only works for public accounts.")
-                  sys.exit(1)
-
-              logger.info(f"✅ Public profile '{username}' found. Total media: {profile.mediacount}")
-
-              # 2. Load history for incremental
-              history = load_history()
-              logger.info(f"📜 Already downloaded: {len(history)} posts")
-
-              # 3. Download posts
-              posts = profile.get_posts()
-              downloaded_count = 0
-              skipped_count = 0
-
-              for post in posts:
-                  if max_posts is not None and downloaded_count >= max_posts:
-                      logger.info(f"Reached max posts limit ({max_posts}). Stopping.")
-                      break
-
-                  shortcode = post.shortcode
-
-                  # Skip if already downloaded
-                  if shortcode in history:
-                      skipped_count += 1
-                      logger.info(f"⏩ Skipping already downloaded post: {shortcode}")
-                      continue
-
-                  # Organize target directory if needed
-                  if organize_by_date:
-                      date_str = post.date_utc.strftime("%Y-%m-%d")
-                      target = f"{username}/{date_str}"
-                  else:
-                      target = username
-
+          # ---- 1. Try to get fresh free proxies ----
+          def fetch_proxies():
+              proxies = set()
+              # Try multiple free proxy APIs (only HTTPS for security)
+              apis = [
+                  "https://proxylist.geonode.com/api/proxy-list?limit=10&page=1&sort_by=lastChecked&sort_type=desc&protocols=https",
+                  "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=https&timeout=10000&country=all&ssl=all&anonymity=all",
+                  # Add more if needed; these often give IP:port lists
+              ]
+              for api in apis:
                   try:
-                      # Download post (instaloader handles images, videos, carousels)
-                      loader.download_post(post, target=target)
-                      history.append(shortcode)
-                      downloaded_count += 1
-                      logger.info(f"⬇️ Downloaded: {shortcode} ({downloaded_count}/{profile.mediacount if not max_posts else max_posts})")
-
-                      # Save history incrementally every 5 posts
-                      if downloaded_count % 5 == 0:
-                          save_history(history)
-
-                      # Human-like delay: random 3-8 seconds, plus occasional longer break
-                      delay = random.uniform(3, 8)
-                      if random.random() < 0.05:  # 5% chance of a longer coffee break
-                          delay += random.uniform(10, 20)
-                      time.sleep(delay)
-
+                      req = Request(api, headers={"User-Agent": "Mozilla/5.0"})
+                      data = urlopen(req, timeout=10).read().decode()
+                      # Parse Geonode JSON
+                      if "proxylist.geonode.com" in api:
+                          jdata = json.loads(data)
+                          for p in jdata.get("data", []):
+                              if p.get("protocols") and "https" in p["protocols"]:
+                                  proxies.add(f"https://{p['ip']}:{p['port']}")
+                      else:
+                          # plain text list, each line ip:port
+                          lines = data.strip().split("\n")
+                          for line in lines:
+                              line = line.strip()
+                              if line and not line.startswith("#"):
+                                  proxies.add(f"https://{line}")
                   except Exception as e:
-                      logger.warning(f"❌ Failed to download {shortcode}: {e}")
+                      print(f"Failed to fetch from {api}: {e}")
+              return list(proxies)
 
-              # Final history save
-              save_history(history)
-              logger.info(f"🏁 Finished. Downloaded {downloaded_count} new posts. Skipped {skipped_count} existing.")
+          # ---- 2. Test a proxy quickly ----
+          def test_proxy(proxy):
+              try:
+                  # Use yt-dlp to test connectivity to Instagram
+                  cmd = ["yt-dlp", "--proxy", proxy, "--max-downloads", "1",
+                         "-s",  # simulate only
+                         "--sleep-requests", "1", "--sleep-interval", "1",
+                         "https://www.instagram.com/p/", "-o", "/dev/null"]
+                  result = subprocess.run(cmd, capture_output=True, timeout=30)
+                  return result.returncode == 0
+              except:
+                  return False
 
-          if __name__ == "__main__":
-              download_profile(USERNAME, MAX_POSTS, ORGANIZE_BY_DATE)
+          # ---- 3. Download reels using a working proxy ----
+          def download_with_proxy(proxy):
+              cmd = [
+                  "yt-dlp",
+                  "--proxy", proxy,
+                  "--extract-audio", "--audio-format", "mp3",  # optional: grab audio only? No, keep video
+                  "--format", "bestvideo+bestaudio/best",  # highest quality
+                  "--output", f"{OUTPUT_DIR}/%(upload_date)s_%(id)s.%(ext)s",
+                  "--no-playlist",
+                  "--sleep-requests", str(random.uniform(1, 3)),
+                  "--sleep-interval", str(random.uniform(1, 3)),
+                  "--max-sleep-interval", "10",
+                  "--user-agent", random.choice([
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+                  ]),
+                  "--download-archive", f"{OUTPUT_DIR}/archive.txt",  # skip duplicates
+              ]
+              if MAX_REELS:
+                  cmd += ["--max-downloads", str(MAX_REELS)]
+              cmd += [f"https://www.instagram.com/{USERNAME}/reels/"]  # Instagram reels tab
+              print(f"Trying proxy: {proxy}")
+              subprocess.run(cmd, timeout=600)  # 10 minutes
+              return True
+
+          # ---- Main logic ----
+          os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+          # First, try without proxy (probably fails but who knows)
+          print("Attempting direct connection (likely to fail)...")
+          try:
+              download_with_proxy("")  # empty string = no proxy
+              print("Amazing! Direct connection worked.")
+          except:
+              print("Direct connection failed. Fetching free proxies...")
+              proxies = fetch_proxies()
+              if not proxies:
+                  print("No free proxies found. Exiting.")
+                  sys.exit(1)
+              random.shuffle(proxies)
+              for proxy in proxies:
+                  print(f"Testing proxy: {proxy}")
+                  if test_proxy(proxy):
+                      print(f"Proxy {proxy} seems alive. Trying download...")
+                      try:
+                          download_with_proxy(proxy)
+                          print(f"Success with proxy {proxy}")
+                          break
+                      except Exception as e:
+                          print(f"Proxy {proxy} failed: {e}")
+                          continue
+                  else:
+                      print(f"Proxy {proxy} is dead.")
+              else:
+                  print("All proxies failed. No reels downloaded.")
           PYEOF
 
-          # Execute the script
-          python mega_scraper.py
+      - name: Run the downloader
+        env:
+          MAX_REELS: ${{ inputs.max_reels }}
+        run: python download_reels.py
 
-      # -------------------------------------------------------------------
-      # COMMIT & PUSH (only if something new was downloaded)
-      # -------------------------------------------------------------------
-      - name: Commit and push media
+      - name: Commit any downloaded reels
         if: always()
         run: |
-          if [ ! -d "${USERNAME}" ]; then
-            echo "No directory ${USERNAME} found. Nothing to commit."
+          if [ ! -d "$USERNAME" ]; then
+            echo "No directory for $USERNAME found. Nothing to commit."
             exit 0
           fi
-
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add "${USERNAME}/"
-
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$USERNAME/"
+          # Don't commit the archive file
+          git reset -- "$USERNAME/archive.txt" 2>/dev/null
           if git diff-index --quiet HEAD; then
-            echo "No new files to commit."
+            echo "No new reels to commit."
           else
-            git commit -m "chore: scrape update for ${USERNAME} [$(date +%Y-%m-%d)]"
+            git commit -m "Download reels for $USERNAME [$(date +%Y-%m-%d)]"
             git push origin HEAD
-            echo "🚀 New media pushed to repository!"
           fi
