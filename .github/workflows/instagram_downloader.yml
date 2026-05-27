@@ -30,7 +30,7 @@ on:
           - "true"
           - "false"
       download_tagged:
-        description: "Download posts you are tagged in?"
+        description: "Download tagged posts?"
         required: false
         default: "false"
         type: choice
@@ -42,7 +42,6 @@ jobs:
   archive:
     runs-on: ubuntu-latest
     timeout-minutes: 360
-
     permissions:
       contents: write
 
@@ -61,14 +60,14 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-instaloader-v1
+          key: ${{ runner.os }}-pip-instaloader-v2
           restore-keys: |
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install instaloader==4.13.1
+          pip install instaloader==4.13.1 requests
 
       - name: Run archiver
         id: archiver
@@ -78,6 +77,7 @@ jobs:
           DL_VIDEOS: ${{ github.event.inputs.download_videos }}
           DL_REELS: ${{ github.event.inputs.download_reels }}
           DL_TAGGED: ${{ github.event.inputs.download_tagged }}
+          IG_SESSION_ID: ${{ secrets.IG_SESSION_ID }}
         run: python archiver.py
 
       - name: Verify output
@@ -88,7 +88,7 @@ jobs:
             exit 1
           fi
           TOTAL=$(find "$DIR" -type f | wc -l)
-          echo "Verification passed. Total files: $TOTAL"
+          echo "Files created: $TOTAL"
           ls -lh "$DIR"
 
       - name: Commit and push
@@ -123,8 +123,8 @@ jobs:
           echo "| Errors | ${{ steps.archiver.outputs.errors }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Run date | $(date -u +'%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Output files" >> $GITHUB_STEP_SUMMARY
-          echo "- \`gallery.html\` — browse your archive in any browser" >> $GITHUB_STEP_SUMMARY
-          echo "- \`posts_metadata.json\` — captions, likes, timestamps, hashtags" >> $GITHUB_STEP_SUMMARY
-          echo "- \`profile.json\` — profile snapshot" >> $GITHUB_STEP_SUMMARY
-          echo "- \`media/\` — all images and videos" >> $GITHUB_STEP_SUMMARY
+          echo "### Output" >> $GITHUB_STEP_SUMMARY
+          echo "- gallery.html — offline visual browser" >> $GITHUB_STEP_SUMMARY
+          echo "- posts_metadata.json — captions, likes, hashtags, timestamps" >> $GITHUB_STEP_SUMMARY
+          echo "- profile.json — profile snapshot" >> $GITHUB_STEP_SUMMARY
+          echo "- media/ — all images and videos" >> $GITHUB_STEP_SUMMARY
