@@ -6,37 +6,12 @@ on:
       target_username:
         description: "Public Instagram username (without @)"
         required: true
-        default: "instagram"
         type: string
       max_posts:
         description: "Max posts to download (0 = ALL)"
         required: false
         default: "0"
         type: string
-      download_videos:
-        description: "Download videos and reels?"
-        required: false
-        default: "true"
-        type: choice
-        options:
-          - "true"
-          - "false"
-      download_reels:
-        description: "Download reels separately?"
-        required: false
-        default: "true"
-        type: choice
-        options:
-          - "true"
-          - "false"
-      download_tagged:
-        description: "Download tagged posts?"
-        required: false
-        default: "false"
-        type: choice
-        options:
-          - "true"
-          - "false"
 
 jobs:
   archive:
@@ -60,24 +35,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-instaloader-v2
+          key: ${{ runner.os }}-pip-apify-v1
           restore-keys: |
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install instaloader==4.13.1 requests
+          pip install apify-client requests
 
       - name: Run archiver
         id: archiver
         env:
           TARGET: ${{ github.event.inputs.target_username }}
           MAX_POSTS: ${{ github.event.inputs.max_posts }}
-          DL_VIDEOS: ${{ github.event.inputs.download_videos }}
-          DL_REELS: ${{ github.event.inputs.download_reels }}
-          DL_TAGGED: ${{ github.event.inputs.download_tagged }}
-          IG_SESSION_ID: ${{ secrets.IG_SESSION_ID }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
         run: python archiver.py
 
       - name: Verify output
@@ -118,13 +90,13 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| | |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| Posts processed | ${{ steps.archiver.outputs.posts_count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Posts found | ${{ steps.archiver.outputs.posts_count }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Files saved | ${{ steps.archiver.outputs.files_saved }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Errors | ${{ steps.archiver.outputs.errors }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Run date | $(date -u +'%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Output" >> $GITHUB_STEP_SUMMARY
-          echo "- gallery.html — offline visual browser" >> $GITHUB_STEP_SUMMARY
+          echo "- gallery.html — beautiful offline visual browser" >> $GITHUB_STEP_SUMMARY
           echo "- posts_metadata.json — captions, likes, hashtags, timestamps" >> $GITHUB_STEP_SUMMARY
           echo "- profile.json — profile snapshot" >> $GITHUB_STEP_SUMMARY
           echo "- media/ — all images and videos" >> $GITHUB_STEP_SUMMARY
