@@ -35,7 +35,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-apify-v1
+          key: ${{ runner.os }}-pip-apify-v2
           restore-keys: |
             ${{ runner.os }}-pip-
 
@@ -44,6 +44,7 @@ jobs:
           pip install --upgrade pip
           pip install apify-client requests
 
+      # ── Inline archiver script (v3 API + proxy downloads) ──────────────
       - name: Create archiver script
         run: |
           cat << 'PYEOF' > archiver.py
@@ -51,10 +52,17 @@ jobs:
           from pathlib import Path
           from datetime import datetime, timezone
 
-          # ── Config ────────────────────────────────────────────────────
+          # ── Config ─────────────────────────────────────────────────────
           TARGET      = os.environ.get("TARGET", "").strip().lstrip("@")
           MAX_POSTS   = int(os.environ.get("MAX_POSTS", "0"))
           APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "").strip()
+
+          # Proxy configuration for media downloads
+          PROXY_HOST     = os.environ.get("APIFY_PROXY_HOST", "proxy.apify.com")
+          PROXY_PORT     = os.environ.get("APIFY_PROXY_PORT", "8000")
+          PROXY_USER     = os.environ.get("APIFY_PROXY_USER", "auto")
+          PROXY_PASSWORD = os.environ.get("APIFY_PROXY_PASSWORD", "")
+          USE_PROXY      = bool(PROXY_PASSWORD)  # only if password is set
 
           if not TARGET:
               print("ERROR: TARGET username is not set.")
@@ -73,10 +81,19 @@ jobs:
           def log(msg):
               print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}", flush=True)
 
+          # ── Download helper with proxy support ─────────────────────────
           def download_file(url, dest: Path, label=""):
               if dest.exists():
                   return True
               try:
+                  if USE_PROXY:
+                      proxy_url = f"http://{PROXY_USER}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+                      proxy_support = urllib.request.ProxyHandler({
+                          "http": proxy_url,
+                          "https": proxy_url,
+                      })
+                      opener = urllib.request.build_opener(proxy_support)
+                      urllib.request.install_opener(opener)
                   req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                   with urllib.request.urlopen(req, timeout=60) as r:
                       dest.write_bytes(r.read())
@@ -85,31 +102,31 @@ jobs:
                   log(f"  Download failed {label}: {e}")
                   return False
 
+          # ── Apify client ──────────────────────────────────────────────
           client = ApifyClient(APIFY_TOKEN)
 
-          # ── Profile scraper ───────────────────────────────────────────
-          # Use .call() — starts actor AND waits for finish in one call.
-          # Do NOT use .start() + .wait_for_finish(); that API no longer exists.
+          # ── Step 1: Profile scraper (v3 start + wait_for_finish) ──────
           log(f"Fetching profile info for @{TARGET} ...")
-          profile_run = client.actor("apify/instagram-profile-scraper").call(
-              run_input={"usernames": [TARGET]},
-              timeout_secs=120,
+          profile_actor = client.actor("apify/instagram-profile-scraper")
+          profile_run_obj = profile_actor.start(
+              run_input={"usernames": [TARGET]}
           )
+          profile_run = profile_run_obj.wait_for_finish(wait_secs=120)
 
           profile_data = {}
           for item in client.dataset(profile_run["defaultDatasetId"]).iterate_items():
               profile_data = {
-                  "username":     item.get("username", TARGET),
-                  "full_name":    item.get("fullName", ""),
-                  "biography":    item.get("biography", ""),
-                  "followers":    item.get("followersCount", 0),
-                  "following":    item.get("followsCount", 0),
-                  "post_count":   item.get("postsCount", 0),
-                  "is_verified":  item.get("verified", False),
-                  "is_business":  item.get("isBusinessAccount", False),
-                  "profile_pic":  item.get("profilePicUrl", ""),
+                  "username":    item.get("username", TARGET),
+                  "full_name":   item.get("fullName", ""),
+                  "biography":   item.get("biography", ""),
+                  "followers":   item.get("followersCount", 0),
+                  "following":   item.get("followsCount", 0),
+                  "post_count":  item.get("postsCount", 0),
+                  "is_verified": item.get("verified", False),
+                  "is_business": item.get("isBusinessAccount", False),
+                  "profile_pic": item.get("profilePicUrl", ""),
                   "external_url": item.get("externalUrl", ""),
-                  "archived_at":  datetime.now(timezone.utc).isoformat(),
+                  "archived_at": datetime.now(timezone.utc).isoformat(),
               }
               break
 
@@ -124,29 +141,30 @@ jobs:
           with open(ROOT / "profile.json", "w", encoding="utf-8") as f:
               json.dump(profile_data, f, indent=2, ensure_ascii=False)
 
+          # Download profile picture (via proxy if configured)
           pic_url = profile_data.get("profile_pic", "")
           if pic_url:
               download_file(pic_url, ROOT / "profile_picture.jpg", "profile picture")
               log("Profile picture saved.")
 
-          # ── Posts scraper ─────────────────────────────────────────────
+          # ── Step 2: Posts scraper (v3 start + wait_for_finish) ────────
           log(f"Fetching posts (limit={'ALL' if MAX_POSTS == 0 else MAX_POSTS}) ...")
           run_input = {
-              "directUrls":   [f"https://www.instagram.com/{TARGET}/"],
-              "resultsType":  "posts",
+              "directUrls": [f"https://www.instagram.com/{TARGET}/"],
+              "resultsType": "posts",
               "resultsLimit": MAX_POSTS if MAX_POSTS > 0 else 999999,
               "addParentData": False,
           }
 
-          # Same fix: .call() instead of .start() + .wait_for_finish()
-          posts_run = client.actor("apify/instagram-scraper").call(
+          posts_actor = client.actor("apify/instagram-scraper")
+          posts_run_obj = posts_actor.start(
               run_input=run_input,
-              timeout_secs=3600,
-              memory_mbytes=1024,
+              options={"memory_mbytes": 1024}
           )
+          posts_run = posts_run_obj.wait_for_finish(wait_secs=3600)
           log("Apify run complete. Downloading media files...")
 
-          # ── Process posts ─────────────────────────────────────────────
+          # ── Step 3: Process posts ────────────────────────────────────
           posts_data = []
           downloaded = 0
           errors     = 0
@@ -167,21 +185,21 @@ jobs:
               log(f"[{idx:>4}/{len(items)}] {type_name:12s}  {shortcode}  {date_str}")
 
               meta = {
-                  "shortcode": shortcode,
-                  "permalink": url,
-                  "caption":   item.get("caption") or item.get("alt") or "",
-                  "timestamp": ts,
-                  "likes":     item.get("likesCount", 0) or item.get("likes", 0),
-                  "comments":  item.get("commentsCount", 0) or item.get("comments", 0),
-                  "type":      type_name,
-                  "is_video":  ptype in ("GraphVideo", "Video"),
-                  "location":  (item.get("locationName") or
-                                (item.get("location") or {}).get("name") or ""),
-                  "hashtags":  item.get("hashtags", []) or [],
-                  "mentions":  item.get("mentions", []) or [],
-                  "video_url": item.get("videoUrl") or "",
-                  "files":     [],
-                  "status":    "ok",
+                  "shortcode":  shortcode,
+                  "permalink":  url,
+                  "caption":    item.get("caption") or item.get("alt") or "",
+                  "timestamp":  ts,
+                  "likes":      item.get("likesCount", 0) or item.get("likes", 0),
+                  "comments":   item.get("commentsCount", 0) or item.get("comments", 0),
+                  "type":       type_name,
+                  "is_video":   ptype in ("GraphVideo", "Video"),
+                  "location":   (item.get("locationName") or
+                                 (item.get("location") or {}).get("name") or ""),
+                  "hashtags":   item.get("hashtags", []) or [],
+                  "mentions":   item.get("mentions", []) or [],
+                  "video_url":  item.get("videoUrl") or "",
+                  "files":      [],
+                  "status":     "ok",
               }
 
               media_urls = []
@@ -190,8 +208,7 @@ jobs:
                   if u:
                       media_urls.append(("image", u))
 
-              display_url = (item.get("displayUrl") or item.get("imageUrl")
-                             or item.get("thumbnailUrl") or "")
+              display_url = item.get("displayUrl") or item.get("imageUrl") or item.get("thumbnailUrl") or ""
               if display_url and not media_urls:
                   media_urls.append(("image", display_url))
 
@@ -205,14 +222,17 @@ jobs:
                   posts_data.append(meta)
                   continue
 
+              post_ok = True
               for mi, (mtype, murl) in enumerate(media_urls, 1):
-                  ext   = "mp4" if mtype == "video" else "jpg"
+                  ext  = "mp4" if mtype == "video" else "jpg"
                   fname = (f"{shortcode}.{ext}" if len(media_urls) == 1
                            else f"{shortcode}_{mi}.{ext}")
                   dest  = MEDIA / fname
                   ok    = download_file(murl, dest, fname)
                   if ok:
                       meta["files"].append(fname)
+                  else:
+                      post_ok = False
 
               if meta["files"]:
                   downloaded += 1
@@ -237,15 +257,15 @@ jobs:
                   continue
               first  = post["files"][0]
               is_vid = first.endswith(".mp4")
-              cap    = (post["caption"] or "")[:140].replace("<", "&lt;").replace(">", "&gt;")
+              cap    = (post["caption"] or "")[:140].replace("<","&lt;").replace(">","&gt;")
               date   = post["timestamp"][:10] if post["timestamp"] else ""
               tags   = " ".join(
                   f'<span class="tag">#{h}</span>'
                   for h in (post["hashtags"] or [])[:5]
               )
-              med   = (f'<video src="media/{first}" controls muted playsinline preload="none"></video>'
-                       if is_vid else f'<img src="media/{first}" loading="lazy" alt="">')
-              badge = ""
+              med    = (f'<video src="media/{first}" controls muted playsinline preload="none"></video>'
+                        if is_vid else f'<img src="media/{first}" loading="lazy" alt="">')
+              badge  = ""
               if post["type"] == "Carousel":
                   badge = f'<span class="badge">&#x1F5BC; {len(post["files"])}</span>'
               elif "Video" in post["type"] or "Reel" in post["type"]:
@@ -352,6 +372,11 @@ jobs:
           TARGET: ${{ github.event.inputs.target_username }}
           MAX_POSTS: ${{ github.event.inputs.max_posts }}
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+          APIFY_PROXY_PASSWORD: ${{ secrets.APIFY_PROXY_PASSWORD }}
+          # Optional: override default proxy settings if needed
+          APIFY_PROXY_HOST: proxy.apify.com
+          APIFY_PROXY_PORT: 8000
+          APIFY_PROXY_USER: auto
         run: python archiver.py
 
       - name: Commit and push archive
