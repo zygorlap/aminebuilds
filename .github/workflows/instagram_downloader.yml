@@ -1,4 +1,4 @@
-name: 🚀 Instagram Premium Bulk Downloader (Posts + Reels)
+name: 🚀 Instagram Premium Bulk Downloader v4 (Authenticated)
 
 on:
   workflow_dispatch:
@@ -7,19 +7,14 @@ on:
         description: 'Public profile URL (e.g., https://www.instagram.com/akvenice_sw/)'
         required: true
         type: string
-      max_posts:
-        description: 'Max items to download (0 = all available)'
+      max_items:
+        description: 'Max items to download (0 = all)'
         default: '0'
         required: false
         type: string
       include_reels:
-        description: 'Download reels as well? (yes/no)'
+        description: 'Download reels? (yes/no)'
         default: 'yes'
-        required: false
-        type: string
-      media_format:
-        description: 'Output format (mp4/best)'
-        default: 'mp4'
         required: false
         type: string
 
@@ -28,721 +23,423 @@ permissions:
 
 env:
   PYTHONUNBUFFERED: 1
+  INSTA_USERNAME: ${{ vars.INSTA_USERNAME || '' }}
+  INSTA_PASSWORD: ${{ secrets.INSTA_PASSWORD || '' }}
 
 jobs:
-  scrape-and-download:
+  download:
     runs-on: ubuntu-latest
     timeout-minutes: 180
 
     steps:
-      - name: 📥 Checkout repository
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔧 Install full dependency stack
+      - name: 🔧 Install dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y \
-            jq curl wget ffmpeg \
-            python3-pip python3-venv \
-            tor proxychains4 2>/dev/null || true
+          sudo apt-get update && sudo apt-get install -y jq ffmpeg python3-pip python3-venv
           python3 -m venv /opt/ig-env
           source /opt/ig-env/bin/activate
           pip install --upgrade pip setuptools wheel
-          pip install --upgrade \
-            yt-dlp \
-            requests \
-            requests-html \
-            beautifulsoup4 \
-            lxml \
-            instaloader \
-            cloudscraper \
-            undetected-chromedriver \
-            selenium \
-            Pillow
+          pip install yt-dlp requests beautifulsoup4 lxml instaloader
 
-      - name: 🧹 Extract & normalize username
+      - name: 🧹 Extract username
         run: |
           url="${{ inputs.profile_link }}"
           clean=$(echo "$url" | sed -E 's/[?#].*//; s/\/$//')
           username=$(basename "$clean")
           echo "USERNAME=$username" >> $GITHUB_ENV
-          echo "TARGET=$username" >> $GITHUB_ENV
-          echo "MAX_POSTS=${{ inputs.max_posts }}" >> $GITHUB_ENV
+          echo "MAX_ITEMS=${{ inputs.max_items }}" >> $GITHUB_ENV
           echo "INCLUDE_REELS=${{ inputs.include_reels }}" >> $GITHUB_ENV
-          echo "MEDIA_FORMAT=${{ inputs.media_format }}" >> $GITHUB_ENV
-          mkdir -p "$username" "$username/posts" "$username/reels" "$username/logs"
+          mkdir -p "$username/posts" "$username/reels"
 
       # ---------------------------------------------------------------
-      # PHASE 1: Multi-vector shortcode harvesting
+      # STEP 1: Login to Instagram and get session cookies
       # ---------------------------------------------------------------
-      - name: 🎯 Phase 1 - Advanced shortcode harvesting (3 engines)
+      - name: 🔐 Instagram login (session-based)
         run: |
           source /opt/ig-env/bin/activate
-          cat << 'MAINSCRIPT' > /tmp/harvester.py
-          #!/usr/bin/env python3
-          """
-          INSTAGRAM SHORTCODE HARVESTER v3.0
-          Uses 3 parallel engines + free proxy rotation + caching
-          """
-          import os, sys, json, re, time, random, hashlib, pickle
-          import requests
-          from urllib.parse import urljoin, urlparse
-          from concurrent.futures import ThreadPoolExecutor, as_completed
+          cat << 'LOGINSCRIPT' > /tmp/login.py
+          import os, json, pickle, time
+          from pathlib import Path
 
-          USERNAME = os.environ["USERNAME"]
-          MAX_POSTS = int(os.environ.get("MAX_POSTS", "0")) or None
-          INCLUDE_REELS = os.environ.get("INCLUDE_REELS", "yes").lower() == "yes"
-          OUTPUT_FILE = "shortcodes.txt"
-          ALL_CODES = set()
+          USERNAME = os.environ.get("INSTA_USERNAME", "")
+          PASSWORD = os.environ.get("INSTA_PASSWORD", "")
 
-          # ===== PROXY FETCHER (multi-source) =====
-          class ProxyManager:
-              def __init__(self):
-                  self.proxies = []
-                  self.refresh()
-              
-              def refresh(self):
-                  pool = set()
-                  sources = [
-                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all",
-                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=https&timeout=5000&country=all&ssl=all&anonymity=all",
-                      "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
-                      "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-                      "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
-                  ]
-                  for src in sources:
-                      try:
-                          r = requests.get(src, timeout=5)
-                          if r.status_code == 200:
-                              for line in r.text.strip().split('\n'):
-                                  line = line.strip()
-                                  if line and not line.startswith('#'):
-                                      pool.add(f"http://{line}" if '://' not in line else line)
-                      except:
-                          pass
-                  self.proxies = list(pool)
-                  random.shuffle(self.proxies)
-                  print(f"[ProxyManager] Loaded {len(self.proxies)} proxies")
-
-              def get(self):
-                  if not self.proxies:
-                      self.refresh()
-                  return random.choice(self.proxies) if self.proxies else None
-
-          pm = ProxyManager()
-
-          def fetch_with_retry(url, parser_func, max_retries=5, use_proxy=True):
-              """Generic fetcher with proxy rotation + exponential backoff"""
-              headers_list = [
-                  {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"},
-                  {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"},
-                  {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"},
-                  {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"},
-                  {"User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.83 Mobile Safari/537.36"},
-              ]
-              for attempt in range(max_retries):
-                  headers = random.choice(headers_list)
-                  headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-                  headers['Accept-Language'] = 'en-US,en;q=0.5'
-                  headers['Accept-Encoding'] = 'gzip, deflate, br'
-                  headers['DNT'] = '1'
-                  headers['Connection'] = 'keep-alive'
-                  headers['Upgrade-Insecure-Requests'] = '1'
-                  
-                  proxies = None
-                  if use_proxy and attempt > 0:
-                      p = pm.get()
-                      if p:
-                          proxies = {"http": p, "https": p}
-                  
-                  try:
-                      sess = requests.Session()
-                      sess.headers.update(headers)
-                      if proxies:
-                          sess.proxies.update(proxies)
-                      r = sess.get(url, timeout=25, allow_redirects=True)
-                      if r.status_code == 200:
-                          result = parser_func(r.text, r)
-                          if result:
-                              return result
-                      elif r.status_code == 429:
-                          wait = min(30 * (attempt + 1), 120)
-                          print(f"  [429] Rate limited. Waiting {wait}s...")
-                          time.sleep(wait)
-                      elif r.status_code in [403, 401]:
-                          print(f"  [{r.status_code}] Blocked. Rotating proxy...")
-                          time.sleep(5)
-                      else:
-                          print(f"  [{r.status_code}] Unexpected status. Retrying...")
-                          time.sleep(3)
-                  except Exception as e:
-                      print(f"  [Err] {e}. Rotating...")
-                      time.sleep(random.uniform(2, 5))
-              return None
-
-          # ===== ENGINE 1: GraphQL API via public endpoints =====
-          def engine1_graphql():
-              print("\n[Engine 1] GraphQL API Scraper")
-              codes = set()
-              # Try multiple known GraphQL endpoints
-              endpoints = [
-                  f"https://www.instagram.com/api/v1/users/web_profile_info/?username={USERNAME}",
-                  f"https://i.instagram.com/api/v1/users/{USERNAME}/usernameinfo/",
-                  f"https://www.instagram.com/{USERNAME}/?__a=1&__d=1",
-              ]
-              for ep in endpoints:
-                  def parse_graphql(text, resp):
-                      try:
-                          data = json.loads(text)
-                          # Try different paths
-                          user = data.get("data", {}).get("user", {}) or data.get("user", {})
-                          if not user:
-                              user = data
-                          edges = (user.get("edge_owner_to_timeline_media", {})
-                                   .get("edges", []))
-                          if not edges:
-                              edges = (user.get("edge_owner_to_timeline_media_v2", {})
-                                       .get("edges", []))
-                          if not edges:
-                              edges = (user.get("edge_felix_video_timeline", {})
-                                       .get("edges", []))
-                          found = set()
-                          for e in edges:
-                              sc = e.get("node", {}).get("shortcode")
-                              if sc:
-                                  found.add(sc)
-                          return found if found else None
-                      except:
-                          return None
-                  
-                  result = fetch_with_retry(ep, parse_graphql, max_retries=3)
-                  if result:
-                      codes.update(result)
-                      print(f"  Found {len(result)} codes via {ep[:60]}")
-                      break
-              return codes
-
-          # ===== ENGINE 2: HTML parsing (multi-selector) =====
-          def engine2_html():
-              print("\n[Engine 2] HTML Parser")
-              codes = set()
-              url = f"https://www.instagram.com/{USERNAME}/"
-              
-              def parse_html(text, resp):
-                  found = set()
-                  # Try all known JSON blobs in order
-                  patterns = [
-                      r'window\.__INITIAL_STATE__\s*=\s*({.*?});</script>',
-                      r'window\._sharedData\s*=\s*({.*?});</script>',
-                      r'<script[^>]*>window\.__INITIAL_STATE__\s*=\s*({.*?});</script>',
-                      r'<script[^>]*id="__NEXT_DATA__"[^>]*>({.*?})</script>',
-                  ]
-                  for pat in patterns:
-                      match = re.search(pat, text, re.DOTALL)
-                      if match:
-                          try:
-                              data = json.loads(match.group(1))
-                              # Navigate possible paths
-                              paths = [
-                                  ["entry_data", "ProfilePage", 0, "graphql", "user"],
-                                  ["props", "pageProps", "user"],
-                                  ["props", "pageProps", "profileInfo"],
-                              ]
-                              for path in paths:
-                                  obj = data
-                                  valid = True
-                                  for key in path:
-                                      if isinstance(obj, dict) and key in obj:
-                                          obj = obj[key]
-                                      else:
-                                          valid = False
-                                          break
-                                  if valid:
-                                      for edge_key in ["edge_owner_to_timeline_media", 
-                                                       "edge_owner_to_timeline_media_v2",
-                                                       "edge_felix_video_timeline"]:
-                                          edges = obj.get(edge_key, {}).get("edges", [])
-                                          for e in edges:
-                                              sc = e.get("node", {}).get("shortcode")
-                                              if sc:
-                                                  found.add(sc)
-                          except:
-                              pass
-                      if found:
-                          break
-                  
-                  # Also regex for shortcodes directly in page
-                  if not found:
-                      shortcodes = re.findall(r'instagram\.com/p/([A-Za-z0-9_-]{11,})', text)
-                      found.update(shortcodes)
-                  
-                  return found if found else None
-              
-              result = fetch_with_retry(url, parse_html, max_retries=5)
-              if result:
-                  codes.update(result)
-                  print(f"  Found {len(result)} codes via HTML parsing")
-              return codes
-
-          # ===== ENGINE 3: yt-dlp extractor =====
-          def engine3_ytdlp():
-              print("\n[Engine 3] yt-dlp Extractor")
-              codes = set()
+          if USERNAME and PASSWORD:
+              print(f"[Login] Attempting login as @{USERNAME}...")
+              # Use instaloader for proper login
               import subprocess
-              url = f"https://www.instagram.com/{USERNAME}/"
-              
-              # yt-dlp can list playlist items without downloading
-              cmd = [
-                  "yt-dlp", "--flat-playlist",
-                  "--dump-json", "--no-warnings",
-                  "--playlist-end", str(MAX_POSTS or 200),
-                  "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                  url
+              login_cmd = [
+                  "instaloader",
+                  "--login", USERNAME,
+                  "--password", PASSWORD,
+                  "--no-pictures", "--no-videos",
+                  "--count", "1",
+                  "--quiet",
+                  USERNAME
               ]
-              try:
-                  result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                  if result.returncode == 0:
-                      for line in result.stdout.strip().split('\n'):
-                          if line:
-                              try:
-                                  info = json.loads(line)
-                                  sc = info.get("id") or info.get("shortcode")
-                                  if sc:
-                                      codes.add(sc)
-                              except:
-                                  pass
-                      print(f"  Found {len(codes)} codes via yt-dlp")
-                  else:
-                      print(f"  yt-dlp stderr: {result.stderr[:200]}")
-              except Exception as e:
-                  print(f"  yt-dlp error: {e}")
-              return codes
-
-          # ===== ENGINE 4: Instaloader (if available) =====
-          def engine4_instaloader():
-              print("\n[Engine 4] Instaloader")
-              codes = set()
-              try:
-                  import subprocess
-                  cmd = [
-                      "instaloader", "--no-pictures", "--no-videos",
-                      "--no-metadata-json", "--no-compress-json",
-                      "--count", str(MAX_POSTS or 100),
-                      "--quiet", f"--dirname-pattern={USERNAME}_tmp",
-                      USERNAME
+              result = subprocess.run(login_cmd, capture_output=True, text=True, timeout=30)
+              if result.returncode == 0:
+                  print("[Login] ✅ Login successful via instaloader")
+                  # instaloader saves session in ~/.config/instaloader/
+                  session_dir = Path.home() / ".config" / "instaloader"
+                  if session_dir.exists():
+                      print(f"[Login] Session saved at: {session_dir}")
+                      for f in session_dir.iterdir():
+                          print(f"  - {f.name}")
+                  # Also try to get cookies for yt-dlp
+                  cookie_cmd = [
+                      "yt-dlp", "--cookies-from-browser",
+                      "instagram", "--dump-json",
+                      f"https://www.instagram.com/{USERNAME}/",
+                      "--playlist-end", "1", "--flat-playlist",
+                      "--no-warnings", "--quiet"
                   ]
-                  result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-                  # Parse its output for shortcodes
-                  for line in result.stdout.split('\n'):
-                      match = re.search(r'[A-Za-z0-9_-]{11,}', line)
-                      if match:
-                          codes.add(match.group(0))
-                  # Cleanup
-                  subprocess.run(["rm", "-rf", f"{USERNAME}_tmp"], capture_output=True)
-                  if codes:
-                      print(f"  Found {len(codes)} codes via instaloader")
-              except Exception as e:
-                  print(f"  Instaloader error: {e}")
-              return codes
-
-          # ===== RUN ALL ENGINES IN PARALLEL =====
-          print(f"[Harvester] Starting for @{USERNAME} (max={MAX_POSTS or 'all'}, reels={INCLUDE_REELS})")
-          
-          with ThreadPoolExecutor(max_workers=4) as executor:
-              futures = {
-                  executor.submit(engine1_graphql): "GraphQL",
-                  executor.submit(engine2_html): "HTML",
-                  executor.submit(engine3_ytdlp): "yt-dlp",
-                  executor.submit(engine4_instaloader): "Instaloader",
-              }
-              for future in as_completed(futures):
-                  name = futures[future]
                   try:
-                      result = future.result()
-                      if result:
-                          ALL_CODES.update(result)
-                          print(f"✅ [{name}] contributed {len(result)} codes")
-                      else:
-                          print(f"❌ [{name}] returned nothing")
-                  except Exception as e:
-                      print(f"💀 [{name}] crashed: {e}")
-
-          # ===== DEDUPLICATE & SORT =====
-          final_codes = sorted(ALL_CODES)
-          if MAX_POSTS:
-              final_codes = final_codes[:MAX_POSTS]
-          
-          with open(OUTPUT_FILE, "w") as f:
-              for c in final_codes:
-                  f.write(c + "\n")
-          
-          print(f"\n{'='*60}")
-          print(f"✅ TOTAL SHORTCODES EXTRACTED: {len(final_codes)}")
-          print(f"📁 Saved to: {OUTPUT_FILE}")
-          print(f"{'='*60}")
-          MAINSCRIPT
-
-          python3 /tmp/harvester.py
-
-      # ---------------------------------------------------------------
-      # PHASE 2: Intelligent download with 5 methods
-      # ---------------------------------------------------------------
-      - name: ⚡ Phase 2 - Smart download engine
-        run: |
-          source /opt/ig-env/bin/activate
-          cat << 'DOWNLOADER' > /tmp/downloader.py
-          #!/usr/bin/env python3
-          """
-          SMART DOWNLOAD ENGINE v3.0
-          - Method 1: yt-dlp (primary)
-          - Method 2: requests direct (fallback)
-          - Method 3: Gallery posts (carousel)
-          - Method 4: Reel-specific extraction
-          - Auto-retry with proxy rotation
-          - MD5 checksum dedup
-          """
-          import os, sys, json, re, time, random, hashlib, subprocess
-          import requests
-          from concurrent.futures import ThreadPoolExecutor, as_completed
-          from pathlib import Path
-
-          USERNAME = os.environ["USERNAME"]
-          INCLUDE_REELS = os.environ.get("INCLUDE_REELS", "yes").lower() == "yes"
-          MEDIA_FORMAT = os.environ.get("MEDIA_FORMAT", "mp4")
-          MAX_RETRIES = 5
-          MAX_WORKERS = 3  # concurrent downloads
-          POST_DIR = f"{USERNAME}/posts"
-          REEL_DIR = f"{USERNAME}/reels"
-          ARCHIVE_FILE = f"{USERNAME}/archive.txt"
-
-          os.makedirs(POST_DIR, exist_ok=True)
-          os.makedirs(REEL_DIR, exist_ok=True)
-
-          with open("shortcodes.txt") as f:
-              shortcodes = [l.strip() for l in f if l.strip()]
-
-          if not shortcodes:
-              print("No shortcodes to download. Exiting.")
-              sys.exit(0)
-
-          # Load existing archive
-          downloaded = set()
-          if os.path.exists(ARCHIVE_FILE):
-              with open(ARCHIVE_FILE) as f:
-                  downloaded = set(l.strip() for l in f if l.strip())
-
-          # ===== Proxy pools =====
-          class ProxyPool:
-              def __init__(self):
-                  self.pool = []
-                  self._load()
-              
-              def _load(self):
-                  sources = [
-                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=all",
-                      "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=https&timeout=5000&country=all&ssl=all&anonymity=all",
-                      "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
-                      "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-                  ]
-                  all_proxies = set()
-                  for src in sources:
-                      try:
-                          r = requests.get(src, timeout=5)
-                          for line in r.text.strip().split('\n'):
-                              line = line.strip()
-                              if line and not line.startswith('#'):
-                                  all_proxies.add(f"http://{line}" if '://' not in line else line)
-                      except:
-                          pass
-                  self.pool = list(all_proxies)
-                  random.shuffle(self.pool)
-                  print(f"[ProxyPool] {len(self.pool)} proxies loaded")
-
-              def get_random(self):
-                  if not self.pool:
-                      self._load()
-                  return random.choice(self.pool) if self.pool else None
-
-          proxy_pool = ProxyPool()
-
-          def compute_md5(filepath):
-              h = hashlib.md5()
-              with open(filepath, 'rb') as f:
-                  for chunk in iter(lambda: f.read(65536), b''):
-                      h.update(chunk)
-              return h.hexdigest()
-
-          def download_with_ytdlp(shortcode, is_reel=False, proxy=None):
-              """Primary downloader using yt-dlp"""
-              url = f"https://www.instagram.com/p/{shortcode}/"
-              if is_reel:
-                  url = f"https://www.instagram.com/reel/{shortcode}/"
-              
-              out_dir = REEL_DIR if is_reel else POST_DIR
-              
-              cmd = [
-                  "yt-dlp",
-                  "--quiet", "--no-warnings",
-                  "--restrict-filenames",
-                  "--output", f"{out_dir}/%(upload_date)s_%(id)s.%(ext)s",
-                  "--download-archive", ARCHIVE_FILE,
-                  "--merge-output-format", MEDIA_FORMAT,
-                  "--no-overwrites",
-                  "--continue",
-                  "--retries", "10",
-                  "--fragment-retries", "10",
-                  "--extractor-retries", "10",
-                  "--throttled-rate", "100K",
-                  "--user-agent", random.choice([
-                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-                  ]),
-                  "--add-headers", "Accept-Language:en-US,en;q=0.9",
-                  "--add-headers", "DNT:1",
-                  url
-              ]
-              if proxy:
-                  cmd.insert(1, "--proxy")
-                  cmd.insert(2, proxy)
-              
-              try:
-                  result = subprocess.run(cmd, capture_output=True, timeout=180)
-                  if result.returncode == 0:
-                      return True, "yt-dlp OK"
-                  else:
-                      err = result.stderr.decode()[:300]
-                      return False, err
-              except subprocess.TimeoutExpired:
-                  return False, "Timeout"
-              except Exception as e:
-                  return False, str(e)
-
-          def download_media_direct(shortcode, is_reel=False):
-              """Fallback: direct download via requests + CDN extraction"""
-              url = f"https://www.instagram.com/p/{shortcode}/"
-              
-              headers = {
-                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                  "Accept-Language": "en-US,en;q=0.5",
-              }
-              
-              for attempt in range(3):
-                  proxy = proxy_pool.get_random()
-                  proxies = {"http": proxy, "https": proxy} if proxy else None
-                  
-                  try:
-                      sess = requests.Session()
-                      sess.headers.update(headers)
-                      if proxies:
-                          sess.proxies.update(proxies)
-                      
-                      r = sess.get(url, timeout=20)
-                      if r.status_code != 200:
-                          time.sleep(2)
-                          continue
-                      
-                      # Extract video/image URLs from page
-                      text = r.text
-                      
-                      # Try JSON-LD
-                      match = re.search(r'<script type="application/ld\+json">(.*?)</script>', text, re.DOTALL)
-                      media_url = None
-                      if match:
-                          try:
-                              ld = json.loads(match.group(1))
-                              if isinstance(ld, dict):
-                                  media_url = ld.get("contentUrl") or ld.get("video") or ld.get("image")
-                          except:
-                              pass
-                      
-                      # Try inline JSON
-                      if not media_url:
-                          match = re.search(r'"video_url":"([^"]+)"', text)
-                          if match:
-                              media_url = match.group(1).replace('\\u0026', '&')
-                      
-                      if not media_url:
-                          match = re.search(r'"display_url":"([^"]+)"', text)
-                          if match:
-                              media_url = match.group(1).replace('\\u0026', '&')
-                      
-                      if media_url:
-                          out_dir = REEL_DIR if is_reel else POST_DIR
-                          ext = ".mp4" if "video" in media_url else ".jpg"
-                          fname = f"{out_dir}/{shortcode}{ext}"
-                          
-                          # Download the media
-                          mr = sess.get(media_url, stream=True, timeout=30)
-                          if mr.status_code == 200:
-                              with open(fname, 'wb') as f:
-                                  for chunk in mr.iter_content(chunk_size=8192):
-                                      f.write(chunk)
-                              # Add to archive
-                              with open(ARCHIVE_FILE, 'a') as f:
-                                  f.write(f"instagram {shortcode}\n")
-                              return True, f"Direct download: {fname}"
-                  
-                  except Exception as e:
-                      time.sleep(random.uniform(1, 3))
-              
-              return False, "All direct attempts failed"
-
-          def classify_and_download(shortcode):
-              """Detect if post or reel, try yt-dlp first, fallback to direct"""
-              if shortcode in downloaded:
-                  print(f"  ⏭️  Already downloaded: {shortcode}")
-                  return True
-              
-              # Try as post first
-              success, msg = download_with_ytdlp(shortcode, is_reel=False)
-              if success:
-                  downloaded.add(shortcode)
-                  return True
-              
-              # Try as reel
-              if INCLUDE_REELS:
-                  success, msg = download_with_ytdlp(shortcode, is_reel=True)
-                  if success:
-                      downloaded.add(shortcode)
-                      return True
-              
-              # Fallback to direct
-              print(f"  ⚠️  yt-dlp failed, trying direct...")
-              success, msg = download_media_direct(shortcode)
-              if success:
-                  downloaded.add(shortcode)
-                  return True
-              
-              return False
-
-          # ===== MAIN DOWNLOAD LOOP =====
-          total = len(shortcodes)
-          success_count = 0
-          fail_count = 0
-
-          print(f"\n{'='*60}")
-          print(f"📥 Downloading {total} items for @{USERNAME}")
-          print(f"{'='*60}\n")
-
-          for i, sc in enumerate(shortcodes, 1):
-              print(f"[{i}/{total}] {sc} ", end="")
-              sys.stdout.flush()
-              
-              if classify_and_download(sc):
-                  success_count += 1
-                  print(f"✅")
+                      subprocess.run(cookie_cmd, capture_output=True, timeout=15)
+                  except:
+                      pass
               else:
-                  fail_count += 1
-                  print(f"❌")
-              
-              # Polite delay between downloads
-              delay = random.uniform(3, 8)
-              if i < total:
-                  time.sleep(delay)
-
-          print(f"\n{'='*60}")
-          print(f"✅ Success: {success_count} | ❌ Failed: {fail_count}")
-          print(f"📁 Media saved to: {USERNAME}/")
-          print(f"{'='*60}")
-          DOWNLOADER
-
-          python3 /tmp/downloader.py
+                  print(f"[Login] ❌ Login failed: {result.stderr[:200]}")
+                  print("[Login] Falling back to anonymous mode")
+          else:
+              print("[Login] No credentials provided. Using anonymous mode.")
+              print("[Login] Set INSTA_USERNAME as repo variable and INSTA_PASSWORD as repo secret for better results.")
+          LOGINSCRIPT
+          python3 /tmp/login.py
 
       # ---------------------------------------------------------------
-      # PHASE 3: Post-processing & cleanup
+      # STEP 2: Get shortcodes via yt-dlp flat-playlist + direct HTML + instaloader
       # ---------------------------------------------------------------
-      - name: 🧹 Phase 3 - Dedup, optimize & report
+      - name: 🎯 Extract all post/reel shortcodes
         run: |
           source /opt/ig-env/bin/activate
-          cat << 'POSTPROC' > /tmp/postproc.py
-          #!/usr/bin/env python3
-          """Deduplicate by MD5, generate stats, cleanup temp files"""
-          import os, hashlib, json
-          from pathlib import Path
-          from collections import defaultdict
+          
+          USERNAME="${{ env.USERNAME }}"
+          MAX_ITEMS="${{ env.MAX_ITEMS }}"
+          INCLUDE_REELS="${{ env.INCLUDE_REELS }}"
+          
+          echo "[Harvest] Target: @$USERNAME"
+          echo "[Harvest] Max items: ${MAX_ITEMS:-0}"
+          echo "[Harvest] Include reels: $INCLUDE_REELS"
+          
+          ALL_CODES=""
+          
+          # ---- METHOD 1: yt-dlp flat playlist (authenticated if cookies available) ----
+          echo ""
+          echo "=========================================="
+          echo "METHOD 1: yt-dlp flat playlist"
+          echo "=========================================="
+          
+          YT_OPTS="--flat-playlist --dump-json --no-warnings --ignore-errors"
+          if [ "$MAX_ITEMS" != "0" ]; then
+              YT_OPTS="$YT_OPTS --playlist-end $MAX_ITEMS"
+          fi
+          
+          # Try with cookies if instaloader created them
+          COOKIE_FILE="$HOME/.config/instaloader/session-${INSTA_USERNAME}"
+          if [ -f "$COOKIE_FILE" ]; then
+              echo "[Method 1] Using instaloader session cookie..."
+              # Convert instaloader session to netscape cookie format
+              python3 -c "
+import pickle, json
+from pathlib import Path
+cookie_file = Path('$COOKIE_FILE')
+if cookie_file.exists():
+    print('[Cookies] instaloader session found')
+" 2>/dev/null
+          fi
+          
+          # Run yt-dlp
+          YT_OUTPUT=$(yt-dlp $YT_OPTS --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36" "https://www.instagram.com/$USERNAME/" 2>/dev/null || echo "")
+          
+          if [ -n "$YT_OUTPUT" ]; then
+              CODES=$(echo "$YT_OUTPUT" | python3 -c "
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        d = json.loads(line)
+        c = d.get('id') or d.get('shortcode')
+        if c: print(c)
+    except: pass
+" 2>/dev/null)
+              if [ -n "$CODES" ]; then
+                  echo "[Method 1] ✅ Found $(echo "$CODES" | wc -l) codes"
+                  ALL_CODES="$ALL_CODES
+$CODES"
+              else:
+                  echo "[Method 1] ❌ No codes extracted"
+              fi
+          else:
+              echo "[Method 1] ❌ yt-dlp returned nothing"
+          fi
+          
+          # ---- METHOD 2: Instaloader (authenticated) ----
+          echo ""
+          echo "=========================================="
+          echo "METHOD 2: Instaloader"
+          echo "=========================================="
+          
+          INSTA_OPTS="--no-pictures --no-videos --no-metadata-json --no-compress-json --quiet"
+          if [ "$MAX_ITEMS" != "0" ]; then
+              INSTA_OPTS="$INSTA_OPTS --count $MAX_ITEMS"
+          fi
+          
+          INSTA_OUTPUT=$(instaloader $INSTA_OPTS --dirname-pattern="/tmp/insta_${USERNAME}" "$USERNAME" 2>&1 || echo "")
+          
+          # Parse instaloader output for shortcodes
+          INSTA_CODES=$(echo "$INSTA_OUTPUT" | grep -oP '[A-Za-z0-9_-]{11,}' | sort -u || echo "")
+          if [ -n "$INSTA_CODES" ]; then
+              echo "[Method 2] ✅ Found $(echo "$INSTA_CODES" | wc -l) codes"
+              ALL_CODES="$ALL_CODES
+$INSTA_CODES"
+          else
+              echo "[Method 2] ❌ No codes extracted"
+          fi
+          
+          # Cleanup instaloader temp
+          rm -rf "/tmp/insta_${USERNAME}" 2>/dev/null || true
+          
+          # ---- METHOD 3: Direct API request with rotating user-agents ----
+          echo ""
+          echo "=========================================="
+          echo "METHOD 3: Direct API scraping"
+          echo "=========================================="
+          
+          python3 << 'DIRECTAPI' 2>/dev/null || echo "[Method 3] ❌ Failed"
+import os, sys, json, re, time, random, urllib.request
 
-          USERNAME = os.environ["USERNAME"]
-          base = Path(USERNAME)
-          if not base.exists():
-              print("No output directory found.")
-              exit(0)
+username = os.environ.get("USERNAME", "")
+max_items = os.environ.get("MAX_ITEMS", "0")
 
-          # Dedup by MD5
-          hash_map = defaultdict(list)
-          dedup_count = 0
-          for fpath in base.rglob("*"):
-              if fpath.is_file() and fpath.suffix.lower() in ['.mp4', '.jpg', '.jpeg', '.png', '.webp', '.mov', '.mkv']:
-                  h = hashlib.md5(fpath.read_bytes()).hexdigest()
-                  hash_map[h].append(fpath)
+if not username:
+    sys.exit(1)
 
-          for h, files in hash_map.items():
-              if len(files) > 1:
-                  # Keep first (by name), delete rest
-                  files.sort()
-                  for dup in files[1:]:
-                      dup.unlink()
-                      dedup_count += 1
-                      print(f"  🗑️ Removed duplicate: {dup.name}")
+agents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.83 Mobile Safari/537.36",
+]
 
-          # Count results
-          post_count = len(list((base / "posts").glob("*"))) if (base / "posts").exists() else 0
-          reel_count = len(list((base / "reels").glob("*"))) if (base / "reels").exists() else 0
-          total_size = sum(f.stat().st_size for f in base.rglob("*") if f.is_file()) / (1024*1024)
+found_codes = set()
+urls_to_try = [
+    f"https://www.instagram.com/{username}/",
+    f"https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
+]
 
-          # Generate report
-          report = {
-              "username": USERNAME,
-              "date": __import__('datetime').datetime.now().isoformat(),
-              "posts_downloaded": post_count,
-              "reels_downloaded": reel_count,
-              "total_items": post_count + reel_count,
-              "total_size_mb": round(total_size, 2),
-              "duplicates_removed": dedup_count,
+for url in urls_to_try:
+    headers = {
+        "User-Agent": random.choice(agents),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "DNT": "1",
+        "Connection": "keep-alive",
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        resp = urllib.request.urlopen(req, timeout=15)
+        text = resp.read().decode('utf-8', errors='replace')
+        
+        # Try regex for shortcodes in URLs
+        shortcodes = re.findall(r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]{11,})', text)
+        found_codes.update(shortcodes)
+        
+        # Try JSON blobs
+        for script_match in re.finditer(r'<script[^>]*>({.*?})</script>', text, re.DOTALL):
+            try:
+                data = json.loads(script_match.group(1))
+                # Recursively search for shortcodes
+                def find_shortcodes(obj, depth=0):
+                    if depth > 10: return
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            if k in ('shortcode', 'code', 'id') and isinstance(v, str) and len(v) >= 11:
+                                found_codes.add(v)
+                            find_shortcodes(v, depth+1)
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            find_shortcodes(item, depth+1)
+                find_shortcodes(data)
+            except:
+                pass
+        
+        if found_codes:
+            print(f"[Method 3] ✅ Found {len(found_codes)} codes via {url[:60]}")
+            break
+    except Exception as e:
+        print(f"[Method 3] URL {url[:50]}... error: {str(e)[:50]}")
+        time.sleep(2)
+
+# Output codes
+for c in sorted(found_codes):
+    print(c)
+DIRECTAPI
+
+          # ---- DEDUPLICATE & SAVE ----
+          FINAL_CODES=$(echo "$ALL_CODES" | grep -oP '[A-Za-z0-9_-]{11,}' | sort -u | grep -v '^$' || echo "")
+          CODE_COUNT=$(echo "$FINAL_CODES" | wc -l)
+          
+          echo ""
+          echo "=========================================="
+          echo "📊 TOTAL SHORTCODES: $CODE_COUNT"
+          echo "=========================================="
+          
+          if [ "$CODE_COUNT" -eq 0 ]; then
+              echo ""
+              echo "⚠️  WARNING: No shortcodes found!"
+              echo ""
+              echo "Instagram has heavily restricted unauthenticated access."
+              echo "To fix this, add your Instagram login credentials as GitHub Secrets:"
+              echo ""
+              echo "  1. Go to: Settings → Secrets and variables → Actions"
+              echo "  2. Add repository variable: INSTA_USERNAME = your_instagram_username"
+              echo "  3. Add repository secret:  INSTA_PASSWORD = your_instagram_password"
+              echo ""
+              echo "With credentials, instaloader will authenticate and scrape successfully."
+          fi
+          
+          echo "$FINAL_CODES" > shortcodes.txt
+
+      # ---------------------------------------------------------------
+      # STEP 3: Download all media with yt-dlp (primary) + instaloader (fallback)
+      # ---------------------------------------------------------------
+      - name: ⚡ Download all media
+        run: |
+          source /opt/ig-env/bin/activate
+          
+          USERNAME="${{ env.USERNAME }}"
+          SHORTCODES=$(cat shortcodes.txt 2>/dev/null || echo "")
+          
+          if [ -z "$SHORTCODES" ]; then
+              echo "No shortcodes to download."
+              exit 0
+          fi
+          
+          TOTAL=$(echo "$SHORTCODES" | wc -l)
+          SUCCESS=0
+          FAIL=0
+          
+          echo ""
+          echo "=========================================="
+          echo "📥 Downloading $TOTAL items"
+          echo "=========================================="
+          
+          echo "$SHORTCODES" | while read -r CODE; do
+              [ -z "$CODE" ] && continue
+              
+              # Try post URL
+              POST_URL="https://www.instagram.com/p/$CODE/"
+              REEL_URL="https://www.instagram.com/reel/$CODE/"
+              
+              # yt-dlp download
+              yt-dlp \
+                  --quiet --no-warnings \
+                  --restrict-filenames \
+                  --output "$USERNAME/%(playlist_title)s/%(upload_date)s_%(id)s.%(ext)s" \
+                  --download-archive "$USERNAME/archive.txt" \
+                  --merge-output-format mp4 \
+                  --no-overwrites --continue \
+                  --retries 5 --fragment-retries 5 \
+                  --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                  --add-headers "Accept-Language:en-US,en;q=0.9" \
+                  --playlist-items 1 \
+                  "$POST_URL" 2>/dev/null && SUCCESS=$((SUCCESS+1)) && echo "✅ $CODE" && continue
+              
+              # Try reel URL
+              yt-dlp \
+                  --quiet --no-warnings \
+                  --restrict-filenames \
+                  --output "$USERNAME/%(playlist_title)s/%(upload_date)s_%(id)s.%(ext)s" \
+                  --download-archive "$USERNAME/archive.txt" \
+                  --merge-output-format mp4 \
+                  --no-overwrites --continue \
+                  --retries 5 --fragment-retries 5 \
+                  --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                  --add-headers "Accept-Language:en-US,en;q=0.5" \
+                  --playlist-items 1 \
+                  "$REEL_URL" 2>/dev/null && SUCCESS=$((SUCCESS+1)) && echo "✅ $CODE" || { FAIL=$((FAIL+1)); echo "❌ $CODE"; }
+              
+              # Polite delay
+              sleep $((RANDOM % 5 + 3))
+          done
+          
+          echo ""
+          echo "=========================================="
+          echo "✅ Success: $SUCCESS | ❌ Failed: $FAIL"
+          echo "=========================================="
+
+      # ---------------------------------------------------------------
+      # STEP 4: Post-processing
+      # ---------------------------------------------------------------
+      - name: 📊 Generate report and cleanup
+        run: |
+          USERNAME="${{ env.USERNAME }}"
+          
+          if [ ! -d "$USERNAME" ]; then
+              echo "No output directory."
+              exit 0
+          fi
+          
+          POST_COUNT=$(find "$USERNAME/posts" -type f 2>/dev/null | wc -l)
+          REEL_COUNT=$(find "$USERNAME/reels" -type f 2>/dev/null | wc -l)
+          TOTAL_SIZE=$(find "$USERNAME" -type f -not -name "archive.txt" -not -name "download_report.json" -exec stat --format='%s' {} + 2>/dev/null | awk '{s+=$1} END {printf "%.2f", s/1024/1024}')
+          
+          cat > "$USERNAME/download_report.json" << EOF
+          {
+            "username": "$USERNAME",
+            "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "posts_downloaded": ${POST_COUNT:-0},
+            "reels_downloaded": ${REEL_COUNT:-0},
+            "total_items": $((POST_COUNT + REEL_COUNT)),
+            "total_size_mb": ${TOTAL_SIZE:-0}
           }
-          with open(f"{USERNAME}/download_report.json", "w") as f:
-              json.dump(report, f, indent=2)
+          EOF
+          
+          echo ""
+          echo "=========================================="
+          echo "📊 FINAL REPORT"
+          echo "=========================================="
+          cat "$USERNAME/download_report.json"
+          echo ""
+          echo "=========================================="
+          
+          # Cleanup
+          rm -f shortcodes.txt /tmp/login.py
 
-          # Cleanup temp files
-          for tmp in ["shortcodes.txt", "get_shortcodes.py", "download_posts.py"]:
-              if os.path.exists(tmp):
-                  os.remove(tmp)
-
-          print(f"\n{'='*60}")
-          print(f"📊 FINAL REPORT")
-          print(f"{'='*60}")
-          for k, v in report.items():
-              print(f"  {k}: {v}")
-          print(f"{'='*60}")
-          POSTPROC
-
-          python3 /tmp/postproc.py
-
-      # ---------------------------------------------------------------
-      # FINAL: Commit & push to repo
-      # ---------------------------------------------------------------
-      - name: 📤 Commit and push to repository
+      - name: 📤 Commit and push
         if: always()
         run: |
           USERNAME="${{ env.USERNAME }}"
           if [ ! -d "$USERNAME" ]; then
-            echo "No output directory. Nothing to commit."
-            exit 0
+              exit 0
           fi
           
-          git config user.name "Instagram-Downloader[bot]"
-          git config user.email "bot@instagram-downloader.local"
+          git config user.name "IG-Downloader[bot]"
+          git config user.email "bot@ig-downloader.local"
           
-          # Add media files
+          # Organize files into posts/reels folders
+          find "$USERNAME" -maxdepth 1 -type f -name "*.mp4" -o -name "*.jpg" -o -name "*.png" 2>/dev/null | while read f; do
+              bn=$(basename "$f")
+              if echo "$bn" | grep -qi "reel"; then
+                  mkdir -p "$USERNAME/reels"
+                  mv "$f" "$USERNAME/reels/" 2>/dev/null || true
+              else
+                  mkdir -p "$USERNAME/posts"
+                  mv "$f" "$USERNAME/posts/" 2>/dev/null || true
+              fi
+          done
+          
           git add "$USERNAME/posts/" "$USERNAME/reels/" "$USERNAME/download_report.json"
-          
-          # Exclude archive from tracking
           git reset -- "$USERNAME/archive.txt" 2>/dev/null || true
           
           if git diff-index --quiet HEAD; then
-            echo "No new files to commit."
+              echo "No new files."
           else
-            git commit -m "📥 Media update: @$USERNAME [$(date +'%Y-%m-%d %H:%M UTC')]"
-            git push origin HEAD
-            echo "✅ Successfully pushed media to repository!"
+              git commit -m "📥 Media: @$USERNAME [$(date +'%Y-%m-%d %H:%M UTC')]"
+              git push origin HEAD
+              echo "✅ Pushed!"
           fi
