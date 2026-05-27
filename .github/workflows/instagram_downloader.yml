@@ -1,4 +1,4 @@
-name: Instagram Public Scraper (No Login)
+name: Instagram Scraper v5 - No Login
 
 on:
   workflow_dispatch:
@@ -28,12 +28,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq ffmpeg python3-pip
-          pip install --upgrade pip
-          pip install yt-dlp requests lxml beautifulsoup4
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq ffmpeg 2>/dev/null
+          pip install -q yt-dlp requests
 
       - name: Extract username
         run: |
@@ -44,293 +43,192 @@ jobs:
           echo "MAX_ITEMS=${{ inputs.max_items }}" >> $GITHUB_ENV
           mkdir -p "$username/posts" "$username/reels"
 
-      - name: Extract shortcodes (no login needed)
+      - name: Get shortcodes from search engines
         run: |
           USERNAME="${{ env.USERNAME }}"
-          MAX_ITEMS="${{ env.MAX_ITEMS }}"
           CODES_FILE="shortcodes.txt"
           > "$CODES_FILE"
-
-          echo "Target: @$USERNAME"
-
-          # ========================
-          # METHOD 1: RSS feed (no auth required)
-          # ========================
-          echo ""
-          echo "=== Method 1: RSS Feed ==="
-          python3 << 'PYEOF' >> "$CODES_FILE" 2>/dev/null || true
-          import urllib.request, re, json, sys, os
+          
+          echo "Searching for @$USERNAME content..."
+          
+          # Create a single Python script that does everything
+          python3 << 'HEREDOC_END' 2>&1
+          import urllib.request, urllib.parse, re, json, sys, os, time, random
+          
           username = os.environ.get('USERNAME', '')
-          if not username: sys.exit(1)
+          if not username:
+              sys.exit(1)
           
-          # Instagram has an unofficial RSS feed
-          urls = [
-              f"https://www.instagram.com/{username}/feed/?__a=1&__d=1",
-              f"https://www.instagram.com/{username}/?__a=1",
-              f"https://i.instagram.com/api/v1/users/web_profile_info/?username={username}",
-          ]
-          
+          all_codes = set()
           headers = {
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-              'Accept': 'application/json, text/html',
-              'Accept-Language': 'en-US',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.5',
           }
           
-          found = set()
-          for url in urls:
-              try:
-                  req = urllib.request.Request(url, headers=headers)
-                  resp = urllib.request.urlopen(req, timeout=10)
-                  text = resp.read().decode('utf-8', errors='replace')
-                  data = json.loads(text)
-                  
-                  # Try multiple paths
-                  def extract(obj, depth=0):
-                      if depth > 15: return
-                      if isinstance(obj, dict):
-                          if 'shortcode' in obj and isinstance(obj['shortcode'], str) and len(obj['shortcode']) >= 11:
-                              found.add(obj['shortcode'])
-                          if 'code' in obj and isinstance(obj['code'], str) and len(obj['code']) >= 11:
-                              found.add(obj['code'])
-                          for v in obj.values():
-                              extract(v, depth+1)
-                      elif isinstance(obj, list):
-                          for item in obj:
-                              extract(item, depth+1)
-                  
-                  extract(data)
-                  if found:
-                      print(f"[RSS] Found {len(found)} codes via {url[:50]}")
-                      break
-              except:
-                  continue
-          
-          for c in sorted(found):
-              print(c)
-          PYEOF
-          echo "Method 1 done: $(wc -l < $CODES_FILE) codes"
-
-          # ========================
-          # METHOD 2: yt-dlp with proper anonymous extraction
-          # ========================
-          echo ""
-          echo "=== Method 2: yt-dlp anonymous ==="
-          python3 << 'PYEOF' 2>/dev/null || true
-          import subprocess, json, sys, os
-          username = os.environ.get('USERNAME', '')
-          max_items = os.environ.get('MAX_ITEMS', '0')
-          if not username: sys.exit(1)
-          
-          cmd = [
-              'yt-dlp', '--flat-playlist', '--dump-json',
-              '--no-warnings', '--ignore-errors',
-              '--extractor-retries', '3',
-              '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-              f'https://www.instagram.com/{username}/'
-          ]
-          
-          if max_items != '0':
-              cmd.extend(['--playlist-end', str(max_items)])
-          
-          result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-          
-          if result.returncode == 0 and result.stdout:
-              for line in result.stdout.strip().split('\n'):
-                  if not line: continue
-                  try:
-                      d = json.loads(line)
-                      c = d.get('id') or d.get('shortcode')
-                      if c: print(c)
-                  except: pass
-              print(f"[yt-dlp] Found codes", file=sys.stderr)
-          else:
-              # Try with different user agents
-              for ua in [
-                  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
-              ]:
-                  cmd2 = [c if c != '--user-agent' else c for c in cmd]
-                  idx = cmd2.index(f'https://www.instagram.com/{username}/') - 1
-                  cmd2[idx] = ua
-                  result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=60)
-                  if result2.returncode == 0 and result2.stdout:
-                      for line in result2.stdout.strip().split('\n'):
-                          if not line: continue
-                          try:
-                              d = json.loads(line)
-                              c = d.get('id') or d.get('shortcode')
-                              if c: print(c)
-                          except: pass
-                      print(f"[yt-dlp] Found with alt UA", file=sys.stderr)
-                      break
-          PYEOF
-          echo "Method 2 done: $(wc -l < $CODES_FILE) codes"
-
-          # ========================
-          # METHOD 3: Google cache / archive.org
-          # ========================
-          echo ""
-          echo "=== Method 3: Google Cache ==="
-          python3 << 'PYEOF' >> "$CODES_FILE" 2>/dev/null || true
-          import urllib.request, re, sys, os
-          username = os.environ.get('USERNAME', '')
-          if not username: sys.exit(1)
-          
-          headers = {'User-Agent': 'Mozilla/5.0'}
-          found = set()
-          
-          # Try Google cache
-          cached_urls = [
-              f"https://webcache.googleusercontent.com/search?q=cache:https://www.instagram.com/{username}/",
-              f"https://archive.org/wayback/available?url=https://www.instagram.com/{username}/",
-          ]
-          
-          for url in cached_urls:
-              try:
-                  req = urllib.request.Request(url, headers=headers)
-                  resp = urllib.request.urlopen(req, timeout=10)
-                  text = resp.read().decode('utf-8', errors='replace')
-                  
-                  # Find any Instagram shortcodes in the cached page
-                  codes = re.findall(r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]{11,})', text)
-                  found.update(codes)
-                  
-                  # Also try JSON blobs
-                  for match in re.finditer(r'"shortcode":"([A-Za-z0-9_-]{11,})"', text):
-                      found.add(match.group(1))
-                  
-                  if found:
-                      print(f"[Cache] Found {len(found)} codes from cache")
-                      break
-              except:
-                  continue
-          
-          for c in sorted(found):
-              print(c)
-          PYEOF
-          echo "Method 3 done: $(wc -l < $CODES_FILE) codes"
-
-          # ========================
-          # METHOD 4: Direct HTML parsing with regex
-          # ========================
-          echo ""
-          echo "=== Method 4: Direct HTML ==="
-          python3 << 'PYEOF' >> "$CODES_FILE" 2>/dev/null || true
-          import urllib.request, re, sys, os
-          username = os.environ.get('USERNAME', '')
-          if not username: sys.exit(1)
-          
-          headers = {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-              'Accept': 'text/html,application/xhtml+xml',
-              'Accept-Language': 'en-US',
-          }
-          
-          found = set()
-          url = f"https://www.instagram.com/{username}/"
-          
+          # METHOD 1: Search Google for instagram.com/username/p/...
+          print("[1/4] Searching Google for post URLs...")
           try:
+              query = urllib.parse.quote(f'site:instagram.com/{username}/p/')
+              url = f'https://www.google.com/search?q={query}&num=100'
               req = urllib.request.Request(url, headers=headers)
               resp = urllib.request.urlopen(req, timeout=15)
+              html = resp.read().decode('utf-8', errors='replace')
+              codes = re.findall(r'instagram\.com/p/([A-Za-z0-9_-]{11,})', html)
+              all_codes.update(codes)
+              print(f"  -> Found {len(codes)} from Google posts")
+          except Exception as e:
+              print(f"  -> Google search failed: {str(e)[:60]}")
+          
+          # METHOD 2: Search Google for instagram.com/username/reel/...
+          print("[2/4] Searching Google for reel URLs...")
+          try:
+              query = urllib.parse.quote(f'site:instagram.com/{username}/reel/')
+              url = f'https://www.google.com/search?q={query}&num=100'
+              req = urllib.request.Request(url, headers={
+                  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                  'Accept': 'text/html',
+              })
+              resp = urllib.request.urlopen(req, timeout=15)
+              html = resp.read().decode('utf-8', errors='replace')
+              codes = re.findall(r'instagram\.com/reel/([A-Za-z0-9_-]{11,})', html)
+              all_codes.update(codes)
+              print(f"  -> Found {len(codes)} from Google reels")
+          except Exception as e:
+              print(f"  -> Google reel search failed: {str(e)[:60]}")
+          
+          # METHOD 3: Try Instagram's OEmbed endpoint (public, no auth)
+          print("[3/4] Trying Instagram OEmbed API...")
+          try:
+              # OEmbed gives us the public info
+              url = f'https://www.instagram.com/{username}/?__a=1&__d=1'
+              req = urllib.request.Request(url, headers=headers)
+              resp = urllib.request.urlopen(req, timeout=10)
               text = resp.read().decode('utf-8', errors='replace')
               
-              # Regex for shortcodes in various formats
-              patterns = [
-                  r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]{11,})',
-                  r'"shortcode"\s*:\s*"([A-Za-z0-9_-]{11,})"',
-                  r'"code"\s*:\s*"([A-Za-z0-9_-]{11,})"',
-                  r'/p/([A-Za-z0-9_-]{11,})',
-                  r'/reel/([A-Za-z0-9_-]{11,})',
-              ]
-              
-              for pat in patterns:
-                  for match in re.finditer(pat, text):
-                      found.add(match.group(1))
-              
-              if found:
-                  print(f"[HTML] Found {len(found)} codes from page")
+              # Try to parse as JSON and extract shortcodes
+              try:
+                  data = json.loads(text)
+                  # Recursive search for shortcodes
+                  def find_codes(obj, depth=0):
+                      if depth > 10: return
+                      if isinstance(obj, dict):
+                          for k, v in obj.items():
+                              if k in ('shortcode', 'code') and isinstance(v, str) and len(v) >= 11:
+                                  all_codes.add(v)
+                              find_codes(v, depth+1)
+                      elif isinstance(obj, list):
+                          for item in obj:
+                              find_codes(item, depth+1)
+                  find_codes(data)
+              except:
+                  # Try regex on the raw text
+                  codes = re.findall(r'"shortcode":"([A-Za-z0-9_-]{11,})"', text)
+                  all_codes.update(codes)
+              print(f"  -> Found {len(codes) if 'codes' in dir() else 0} from OEmbed")
+          except Exception as e:
+              print(f"  -> OEmbed failed: {str(e)[:60]}")
+          
+          # METHOD 4: Try the raw profile page with multiple user agents
+          print("[4/4] Trying raw profile page...")
+          user_agents = [
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+              'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+              'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.83 Mobile Safari/537.36',
+          ]
+          for ua in user_agents:
+              try:
+                  req = urllib.request.Request(f'https://www.instagram.com/{username}/', headers={
+                      'User-Agent': ua,
+                      'Accept': 'text/html',
+                      'Accept-Language': 'en-US',
+                  })
+                  resp = urllib.request.urlopen(req, timeout=10)
+                  html = resp.read().decode('utf-8', errors='replace')
+                  codes = re.findall(r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]{11,})', html)
+                  all_codes.update(codes)
+                  if codes:
+                      print(f"  -> Found {len(codes)} with mobile UA")
+                      break
+              except:
+                  continue
+          
+          # Print results
+          final = sorted(all_codes)
+          print(f"\nTotal unique shortcodes: {len(final)}")
+          for c in final:
+              print(c)
+          
+          HEREDOC_END
+          
+          # Capture output to file - but we need to write it differently
+          python3 << 'HEREDOC_END2' > "$CODES_FILE"
+          import urllib.request, urllib.parse, re, json, sys, os
+          
+          username = os.environ.get('USERNAME', '')
+          if not username:
+              sys.exit(1)
+          
+          all_codes = set()
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+          }
+          
+          # Google search for posts
+          try:
+              query = urllib.parse.quote(f'site:instagram.com/{username}/p/')
+              req = urllib.request.Request(f'https://www.google.com/search?q={query}&num=100', headers=headers)
+              resp = urllib.request.urlopen(req, timeout=15)
+              html = resp.read().decode('utf-8', errors='replace')
+              codes = re.findall(r'instagram\.com/p/([A-Za-z0-9_-]{11,})', html)
+              all_codes.update(codes)
           except:
               pass
           
-          for c in sorted(found):
+          # Google search for reels
+          try:
+              query = urllib.parse.quote(f'site:instagram.com/{username}/reel/')
+              req = urllib.request.Request(f'https://www.google.com/search?q={query}&num=100', headers=headers)
+              resp = urllib.request.urlopen(req, timeout=15)
+              html = resp.read().decode('utf-8', errors='replace')
+              codes = re.findall(r'instagram\.com/reel/([A-Za-z0-9_-]{11,})', html)
+              all_codes.update(codes)
+          except:
+              pass
+          
+          # OEmbed API
+          try:
+              req = urllib.request.Request(f'https://www.instagram.com/{username}/?__a=1', headers=headers)
+              resp = urllib.request.urlopen(req, timeout=10)
+              text = resp.read().decode('utf-8', errors='replace')
+              codes = re.findall(r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]{11,})', text)
+              all_codes.update(codes)
+          except:
+              pass
+          
+          # Direct page
+          for ua in [
+              'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+              'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.83 Mobile Safari/537.36',
+          ]:
+              try:
+                  req = urllib.request.Request(f'https://www.instagram.com/{username}/', headers={
+                      'User-Agent': ua,
+                      'Accept': 'text/html',
+                  })
+                  resp = urllib.request.urlopen(req, timeout=10)
+                  html = resp.read().decode('utf-8', errors='replace')
+                  codes = re.findall(r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]{11,})', html)
+                  all_codes.update(codes)
+                  if codes:
+                      break
+              except:
+                  continue
+          
+          for c in sorted(all_codes):
               print(c)
-          PYEOF
-          echo "Method 4 done: $(wc -l < $CODES_FILE) codes"
-
-          # ========================
-          # DEDUPLICATE
-          # ========================
-          sort -u -o "$CODES_FILE" "$CODES_FILE"
-          TOTAL=$(wc -l < "$CODES_FILE")
           
-          echo ""
-          echo "=========================================="
-          echo "TOTAL SHORTCODES: $TOTAL"
-          echo "=========================================="
-          
-          if [ "$TOTAL" -eq 0 ]; then
-            echo ""
-            echo "Still no shortcodes. Attempting emergency method..."
-            echo ""
-            
-            # Emergency: use yt-dlp with --ignore-no-formats-error and multiple attempts
-            python3 << 'PYEOF' 2>/dev/null || true
-            import subprocess, json, sys, os, time, random
-            username = os.environ.get('USERNAME', '')
-            if not username: sys.exit(1)
-            
-            # Try with different URL formats
-            urls_to_try = [
-                f"https://www.instagram.com/{username}/",
-                f"https://www.instagram.com/{username}/feed/",
-                f"https://www.instagram.com/{username}/?hl=en",
-            ]
-            
-            user_agents = [
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-            ]
-            
-            all_codes = set()
-            
-            for url in urls_to_try:
-                for ua in user_agents:
-                    cmd = [
-                        'yt-dlp', '--flat-playlist', '--dump-json',
-                        '--no-warnings', '--ignore-errors',
-                        '--extractor-retries', '5',
-                        '--user-agent', ua,
-                        url
-                    ]
-                    try:
-                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                        if result.stdout:
-                            for line in result.stdout.strip().split('\n'):
-                                if not line: continue
-                                try:
-                                    d = json.loads(line)
-                                    c = d.get('id') or d.get('shortcode')
-                                    if c: all_codes.add(c)
-                                except: pass
-                    except:
-                        pass
-                    time.sleep(random.uniform(1, 3))
-                    
-                    if all_codes:
-                        break
-                if all_codes:
-                    break
-            
-            for c in sorted(all_codes):
-                print(c)
-            PYEOF
-          fi
-          
-          # Final count
-          sort -u -o "$CODES_FILE" "$CODES_FILE"
-          echo ""
-          echo "FINAL TOTAL: $(wc -l < $CODES_FILE) shortcodes"
+          HEREDOC_END2
 
       - name: Download media
         run: |
@@ -338,7 +236,13 @@ jobs:
           CODES_FILE="shortcodes.txt"
           
           if [ ! -s "$CODES_FILE" ]; then
-            echo "No shortcodes to download."
+            echo "No shortcodes found."
+            echo ""
+            echo "Instagram now requires authentication for @$USERNAME."
+            echo "Possible solutions:"
+            echo "1. Add INSTA_USERNAME var and INSTA_PASSWORD secret to repo settings"
+            echo "2. Try a different public account"
+            echo "3. Some accounts are locked behind login-wall"
             exit 0
           fi
           
@@ -347,47 +251,42 @@ jobs:
           FAIL=0
           COUNT=0
           
-          echo ""
-          echo "Downloading $TOTAL items for @$USERNAME"
-          echo ""
+          echo "Downloading $TOTAL items..."
           
           while IFS= read -r CODE; do
             [ -z "$CODE" ] && continue
             COUNT=$((COUNT+1))
             printf "[%d/%d] %s " "$COUNT" "$TOTAL" "$CODE"
             
-            # Try post
+            # Try post URL
             if yt-dlp --quiet --no-warnings --restrict-filenames \
               --output "$USERNAME/posts/%(upload_date)s_%(id)s.%(ext)s" \
               --download-archive "$USERNAME/archive.txt" \
               --merge-output-format mp4 \
               --no-overwrites --continue \
-              --retries 5 --fragment-retries 5 \
-              --extractor-retries 5 \
+              --retries 5 \
               "https://www.instagram.com/p/$CODE/" 2>/dev/null; then
               SUCCESS=$((SUCCESS+1))
               echo "OK"
-            # Try reel
             elif yt-dlp --quiet --no-warnings --restrict-filenames \
               --output "$USERNAME/reels/%(upload_date)s_%(id)s.%(ext)s" \
               --download-archive "$USERNAME/archive.txt" \
               --merge-output-format mp4 \
               --no-overwrites --continue \
-              --retries 5 --fragment-retries 5 \
-              --extractor-retries 5 \
+              --retries 5 \
               "https://www.instagram.com/reel/$CODE/" 2>/dev/null; then
               SUCCESS=$((SUCCESS+1))
-              echo "OK (reel)"
+              echo "OK"
             else
               FAIL=$((FAIL+1))
               echo "FAIL"
             fi
             
-            sleep 3
+            sleep 2
           done < "$CODES_FILE"
           
           echo ""
-          echo "Success: $SUCCESS | Failed: $FAIL"
+          echo "Done: $SUCCESS OK, $FAIL failed"
 
       - name: Report and push
         if: always()
@@ -395,26 +294,22 @@ jobs:
           USERNAME="${{ env.USERNAME }}"
           if [ ! -d "$USERNAME" ]; then exit 0; fi
           
-          # Count
           POST_COUNT=$(find "$USERNAME/posts" -type f 2>/dev/null | wc -l)
           REEL_COUNT=$(find "$USERNAME/reels" -type f 2>/dev/null | wc -l)
-          TOTAL_SIZE=$(find "$USERNAME" -type f -not -name "archive.txt" -not -name "download_report.json" -exec stat --format='%s' {} + 2>/dev/null | awk '{s+=$1} END {printf "%.2f", s/1024/1024}')
+          TOTAL_SIZE=$(find "$USERNAME" -type f ! -name "archive.txt" ! -name "download_report.json" -exec stat --format='%s' {} + 2>/dev/null | awk '{s+=$1} END {printf "%.2f", s/1024/1024}')
           
-          cat > "$USERNAME/download_report.json" << EOF
-          {
-            "username": "$USERNAME",
-            "date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "posts_downloaded": ${POST_COUNT:-0},
-            "reels_downloaded": ${REEL_COUNT:-0},
-            "total_items": $((POST_COUNT + REEL_COUNT)),
-            "total_size_mb": ${TOTAL_SIZE:-0}
-          }
-          EOF
+          jq -n \
+            --arg u "$USERNAME" \
+            --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson p "${POST_COUNT:-0}" \
+            --argjson r "${REEL_COUNT:-0}" \
+            --argjson t "$((POST_COUNT + REEL_COUNT))" \
+            --argjson s "${TOTAL_SIZE:-0}" \
+            '{username: $u, date: $d, posts_downloaded: $p, reels_downloaded: $r, total_items: $t, total_size_mb: $s}' \
+            > "$USERNAME/download_report.json"
           
-          echo "Report:"
           cat "$USERNAME/download_report.json"
           
-          # Push
           git config user.name "IG-Bot"
           git config user.email "bot@localhost"
           git add "$USERNAME/posts/" "$USERNAME/reels/" "$USERNAME/download_report.json"
