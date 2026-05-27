@@ -1,5 +1,5 @@
 """
-Instagram Public Archiver — powered by Apify
+Instagram Public Archiver — powered by Apify (v3+)
 No Instagram login. No cookies. Username only.
 Requires: pip install apify-client requests
 """
@@ -56,11 +56,12 @@ client = ApifyClient(APIFY_TOKEN)
 
 # ── Step 1: Scrape profile info ────────────────────────────────────────────────
 log(f"Fetching profile info for @{TARGET} ...")
+# v3: use wait_secs instead of timeout_secs
 profile_run = client.actor("apify/instagram-profile-scraper").call(
     run_input={
         "usernames": [TARGET],
     },
-    timeout_secs=120,
+    wait_secs=120,   # <-- was timeout_secs
 )
 
 profile_data = {}
@@ -107,11 +108,13 @@ run_input = {
     "addParentData": False,
 }
 
-posts_run = client.actor("apify/instagram-scraper").call(
+# v3: memory must be passed via start(), call() does not support memory_mbytes
+actor = client.actor("apify/instagram-scraper")
+run = actor.start(
     run_input=run_input,
-    timeout_secs=3600,
-    memory_mbytes=1024,
+    options={"memory_mbytes": 1024},        # <-- moved here
 )
+posts_run = run.wait_for_finish(wait_secs=3600)   # <-- replaced call(timeout_secs=...)
 
 log("Apify run complete. Downloading media files...")
 
