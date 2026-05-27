@@ -1,5 +1,5 @@
 """
-Instagram Public Archiver — powered by Apify (v3+)
+Instagram Public Archiver — Apify v3 (call-only, no timeouts)
 No Instagram login. No cookies. Username only.
 Requires: pip install apify-client requests
 """
@@ -8,7 +8,7 @@ import os, sys, json, time, urllib.request, urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
 
-# ── Auto-install ───────────────────────────────────────────────────────────────
+# ── Auto-install (if run locally) ─────────────────────────────────────────────
 try:
     from apify_client import ApifyClient
 except ImportError:
@@ -18,16 +18,22 @@ except ImportError:
     from apify_client import ApifyClient
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-TARGET     = os.environ.get("TARGET", "").strip().lstrip("@")
-MAX_POSTS  = int(os.environ.get("MAX_POSTS", "0"))   # 0 = all
+TARGET      = os.environ.get("TARGET", "").strip().lstrip("@")
+MAX_POSTS   = int(os.environ.get("MAX_POSTS", "0"))   # 0 = all
 APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "").strip()
+
+# Proxy for media downloads (optional)
+PROXY_HOST     = os.environ.get("APIFY_PROXY_HOST", "proxy.apify.com")
+PROXY_PORT     = os.environ.get("APIFY_PROXY_PORT", "8000")
+PROXY_USER     = os.environ.get("APIFY_PROXY_USER", "auto")
+PROXY_PASSWORD = os.environ.get("APIFY_PROXY_PASSWORD", "")
+USE_PROXY      = bool(PROXY_PASSWORD)
 
 if not TARGET:
     print("ERROR: TARGET username is not set.")
     sys.exit(1)
 if not APIFY_TOKEN:
     print("ERROR: APIFY_TOKEN secret is not set.")
-    print("  → Go to https://apify.com → Sign up free → Settings → API tokens")
     sys.exit(1)
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -43,6 +49,14 @@ def download_file(url, dest: Path, label=""):
     if dest.exists():
         return True
     try:
+        if USE_PROXY:
+            proxy_url = f"http://{PROXY_USER}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+            proxy_support = urllib.request.ProxyHandler({
+                "http": proxy_url,
+                "https": proxy_url,
+            })
+            opener = urllib.request.build_opener(proxy_support)
+            urllib.request.install_opener(opener)
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=60) as r:
             dest.write_bytes(r.read())
@@ -56,12 +70,9 @@ client = ApifyClient(APIFY_TOKEN)
 
 # ── Step 1: Scrape profile info ────────────────────────────────────────────────
 log(f"Fetching profile info for @{TARGET} ...")
-# v3: use wait_secs instead of timeout_secs
+# v3: call() runs synchronously, returns the run object directly
 profile_run = client.actor("apify/instagram-profile-scraper").call(
-    run_input={
-        "usernames": [TARGET],
-    },
-    wait_secs=120,   # <-- was timeout_secs
+    run_input={"usernames": [TARGET]}
 )
 
 profile_data = {}
@@ -79,7 +90,7 @@ for item in client.dataset(profile_run["defaultDatasetId"]).iterate_items():
         "external_url": item.get("externalUrl", ""),
         "archived_at": datetime.now(timezone.utc).isoformat(),
     }
-    break  # only one profile
+    break
 
 if not profile_data:
     log("WARNING: Could not fetch profile info. Proceeding with posts only.")
@@ -92,7 +103,6 @@ else:
 with open(ROOT / "profile.json", "w", encoding="utf-8") as f:
     json.dump(profile_data, f, indent=2, ensure_ascii=False)
 
-# ── Download profile picture ───────────────────────────────────────────────────
 pic_url = profile_data.get("profile_pic", "")
 if pic_url:
     download_file(pic_url, ROOT / "profile_picture.jpg", "profile picture")
@@ -100,7 +110,6 @@ if pic_url:
 
 # ── Step 2: Scrape all posts ───────────────────────────────────────────────────
 log(f"Fetching posts (limit={'ALL' if MAX_POSTS == 0 else MAX_POSTS}) ...")
-
 run_input = {
     "directUrls": [f"https://www.instagram.com/{TARGET}/"],
     "resultsType": "posts",
@@ -108,17 +117,11 @@ run_input = {
     "addParentData": False,
 }
 
-# v3: memory must be passed via start(), call() does not support memory_mbytes
-actor = client.actor("apify/instagram-scraper")
-run = actor.start(
-    run_input=run_input,
-    options={"memory_mbytes": 1024},        # <-- moved here
-)
-posts_run = run.wait_for_finish(wait_secs=3600)   # <-- replaced call(timeout_secs=...)
-
+# v3: call() without memory/timeout – actor defaults are sufficient
+posts_run = client.actor("apify/instagram-scraper").call(run_input=run_input)
 log("Apify run complete. Downloading media files...")
 
-# ── Step 3: Download media + build metadata ─────────────────────────────────
+# ── Step 3: Download media + metadata ──────────────────────────────────────────
 posts_data = []
 downloaded = 0
 errors     = 0
@@ -156,21 +159,16 @@ for idx, item in enumerate(items, 1):
         "status":     "ok",
     }
 
-    # ── Collect all media URLs for this post ─────────────────────────────────
     media_urls = []
-
-    # Carousel / sidecar
     for img in item.get("images", []):
         u = img if isinstance(img, str) else img.get("url") or img.get("src", "")
         if u:
             media_urls.append(("image", u))
 
-    # Single image
     display_url = item.get("displayUrl") or item.get("imageUrl") or item.get("thumbnailUrl") or ""
     if display_url and not media_urls:
         media_urls.append(("image", display_url))
 
-    # Video
     video_url = item.get("videoUrl") or ""
     if video_url:
         media_urls.append(("video", video_url))
@@ -181,7 +179,6 @@ for idx, item in enumerate(items, 1):
         posts_data.append(meta)
         continue
 
-    # ── Download each media file ──────────────────────────────────────────────
     post_ok = True
     for mi, (mtype, murl) in enumerate(media_urls, 1):
         ext  = "mp4" if mtype == "video" else "jpg"
