@@ -1,208 +1,130 @@
-name: Instagram Posts Archiver
+name: Instagram Public Archiver
 
 on:
   workflow_dispatch:
     inputs:
-      username:
-        description: 'Instagram username (without @)'
+      target_username:
+        description: "Public Instagram username (without @)"
         required: true
+        default: "instagram"
         type: string
+      max_posts:
+        description: "Max posts to download (0 = ALL)"
+        required: false
+        default: "0"
+        type: string
+      download_videos:
+        description: "Download videos and reels?"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      download_reels:
+        description: "Download reels separately?"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      download_tagged:
+        description: "Download posts you are tagged in?"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 jobs:
-  archive-posts:
+  archive:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 360
+
     permissions:
       contents: write
-      
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-instaloader-v1
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install instagrapi pillow
+          pip install --upgrade pip
+          pip install instaloader==4.13.1
 
-      - name: Download Instagram posts
-        id: download
-        run: |
-          python << 'EOF'
-          import os
-          import json
-          from datetime import datetime
-          from pathlib import Path
-          from instagrapi import Client
-          
-          # Initialize client
-          cl = Client()
-          
-          # Credentials from GitHub secrets
-          username = "${{ github.event.inputs.username }}"
-          ig_username = "${{ secrets.INSTAGRAM_USERNAME }}"
-          ig_password = "${{ secrets.INSTAGRAM_PASSWORD }}"
-          
-          # Create archive directory
-          archive_dir = Path("instagram_archive")
-          archive_dir.mkdir(exist_ok=True)
-          
-          # Create user subdirectory
-          user_dir = archive_dir / username
-          user_dir.mkdir(exist_ok=True)
-          
-          # Create media directory
-          media_dir = user_dir / "media"
-          media_dir.mkdir(exist_ok=True)
-          
-          try:
-              print(f"Logging in to Instagram as {ig_username}...")
-              cl.login(ig_username, ig_password)
-              
-              print(f"Fetching posts from @{username}...")
-              user = cl.user_info_by_username(username)
-              user_id = user.pk
-              
-              # Get all posts
-              medias = cl.user_medias(user_id)
-              
-              posts_data = []
-              
-              print(f"Found {len(medias)} posts. Downloading...")
-              
-              for idx, media in enumerate(medias, 1):
-                  post_info = {
-                      "id": media.id,
-                      "caption": media.caption,
-                      "timestamp": media.taken_at.isoformat() if media.taken_at else None,
-                      "likes": media.like_count,
-                      "comments": media.comment_count,
-                      "media_type": media.media_type,
-                      "url": media.link,
-                      "media_files": []
-                  }
-                  
-                  # Download images/videos
-                  if media.media_type == 1:  # Photo
-                      filename = f"post_{media.id}_photo.jpg"
-                      filepath = media_dir / filename
-                      
-                      if not filepath.exists():
-                          with open(filepath, 'wb') as f:
-                              f.write(media.get_file().read())
-                      
-                      post_info["media_files"].append(filename)
-                      print(f"[{idx}] Downloaded photo: {filename}")
-                      
-                  elif media.media_type == 2:  # Video
-                      filename = f"post_{media.id}_video.mp4"
-                      filepath = media_dir / filename
-                      
-                      if not filepath.exists():
-                          with open(filepath, 'wb') as f:
-                              f.write(media.get_file().read())
-                      
-                      post_info["media_files"].append(filename)
-                      print(f"[{idx}] Downloaded video: {filename}")
-                      
-                  elif media.media_type == 8:  # Album (carousel)
-                      for res_idx, resource in enumerate(media.resources, 1):
-                          if resource.media_type == 1:
-                              filename = f"post_{media.id}_carousel_{res_idx}.jpg"
-                          else:
-                              filename = f"post_{media.id}_carousel_{res_idx}.mp4"
-                          
-                          filepath = media_dir / filename
-                          
-                          if not filepath.exists():
-                              with open(filepath, 'wb') as f:
-                                  f.write(resource.get_file().read())
-                          
-                          post_info["media_files"].append(filename)
-                      print(f"[{idx}] Downloaded carousel with {len(media.resources)} items")
-                  
-                  posts_data.append(post_info)
-              
-              # Save metadata as JSON
-              metadata_file = user_dir / "posts_metadata.json"
-              with open(metadata_file, 'w', encoding='utf-8') as f:
-                  json.dump(posts_data, f, indent=2, ensure_ascii=False)
-              
-              print(f"\nâœ… Successfully archived {len(posts_data)} posts!")
-              print(f"ðŸ“ Saved to: {user_dir}")
-              
-              # Set output for next step
-              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                  f.write(f"posts_count={len(posts_data)}\n")
-                  f.write(f"user_dir={user_dir}\n")
-              
-          except Exception as e:
-              print(f"âŒ Error: {str(e)}")
-              raise
-          finally:
-              try:
-                  cl.logout()
-              except:
-                  pass
-          
-          EOF
+      - name: Run archiver
+        id: archiver
+        env:
+          TARGET: ${{ github.event.inputs.target_username }}
+          MAX_POSTS: ${{ github.event.inputs.max_posts }}
+          DL_VIDEOS: ${{ github.event.inputs.download_videos }}
+          DL_REELS: ${{ github.event.inputs.download_reels }}
+          DL_TAGGED: ${{ github.event.inputs.download_tagged }}
+        run: python archiver.py
 
-      - name: Create README
+      - name: Verify output
         run: |
-          cat > instagram_archive/${{ github.event.inputs.username }}/README.md << 'EOF'
-          # Instagram Archive: ${{ github.event.inputs.username }}
-          
-          **Archived on:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
-          **Total Posts:** ${{ steps.download.outputs.posts_count }}
-          
-          ## Contents
-          - `media/` - Downloaded images and videos
-          - `posts_metadata.json` - Post metadata (captions, likes, timestamps, etc.)
-          
-          ## File Structure
-          ```
-          instagram_archive/${{ github.event.inputs.username }}/
-          â”œâ”€â”€ README.md
-          â”œâ”€â”€ posts_metadata.json
-          â””â”€â”€ media/
-              â”œâ”€â”€ post_[id]_photo.jpg
-              â”œâ”€â”€ post_[id]_video.mp4
-              â””â”€â”€ ...
-          ```
-          
-          ## Notes
-          - This archive is created automatically by GitHub Actions
-          - Please respect Instagram's Terms of Service
-          - Images and videos are your own content
-          
-          EOF
+          DIR="instagram_archive/${{ github.event.inputs.target_username }}"
+          if [ ! -d "$DIR" ]; then
+            echo "ERROR: Archive directory missing!"
+            exit 1
+          fi
+          TOTAL=$(find "$DIR" -type f | wc -l)
+          echo "Verification passed. Total files: $TOTAL"
+          ls -lh "$DIR"
 
-      - name: Commit and push changes
+      - name: Commit and push
         run: |
-          git config user.name "GitHub Actions Bot"
-          git.config user.email "actions@github.com"
-          
+          git config user.name "Instagram Archiver Bot"
+          git config user.email "actions@github.com"
           git add instagram_archive/
-          
           if git diff --quiet --cached; then
-            echo "âœ… No new posts to commit"
+            echo "Nothing new to commit."
           else
-            git commit -m "Archive: Add Instagram posts from @${{ github.event.inputs.username }} on $(date -u +'%Y-%m-%d')"
+            git commit -m "archive(@${{ github.event.inputs.target_username }}): $(date -u +%Y-%m-%d)"
             git push
-            echo "âœ… Pushed to repository"
           fi
 
-      - name: Workflow summary
+      - name: Upload artifact (30-day backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ github.event.inputs.target_username }}-${{ github.run_id }}
+          path: instagram_archive/
+          retention-days: 30
+
+      - name: Job summary
         if: always()
         run: |
-          echo "## ðŸ“¸ Instagram Archive Workflow" >> $GITHUB_STEP_SUMMARY
+          echo "## Instagram Archive — @${{ github.event.inputs.target_username }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Username:** @${{ github.event.inputs.username }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Posts Archived:** ${{ steps.download.outputs.posts_count }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Status:** âœ… Complete" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Posts processed | ${{ steps.archiver.outputs.posts_count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Files saved | ${{ steps.archiver.outputs.files_saved }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Errors | ${{ steps.archiver.outputs.errors }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run date | $(date -u +'%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Output files" >> $GITHUB_STEP_SUMMARY
+          echo "- \`gallery.html\` — browse your archive in any browser" >> $GITHUB_STEP_SUMMARY
+          echo "- \`posts_metadata.json\` — captions, likes, timestamps, hashtags" >> $GITHUB_STEP_SUMMARY
+          echo "- \`profile.json\` — profile snapshot" >> $GITHUB_STEP_SUMMARY
+          echo "- \`media/\` — all images and videos" >> $GITHUB_STEP_SUMMARY
