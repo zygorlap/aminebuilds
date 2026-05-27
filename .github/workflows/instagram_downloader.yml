@@ -1,4 +1,4 @@
-name: Free Instagram Posts & Reels Downloader
+name: Free Instagram All Posts & Reels (No Login)
 
 on:
   workflow_dispatch:
@@ -16,47 +16,40 @@ permissions:
   contents: write
 
 jobs:
-  download:
+  scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Install Python tools
+      - name: Install dependencies
         run: |
+          sudo apt-get update && sudo apt-get install -y jq
           python -m pip install --upgrade pip
-          pip install instaloader yt-dlp requests
+          pip install yt-dlp requests
 
-      - name: Extract username safely
-        id: extract
+      - name: Extract username
         run: |
-          # Remove query parameters and trailing slashes, then take last segment
           url="${{ inputs.profile_link }}"
           clean=$(echo "$url" | sed -E 's/[?#].*//; s/\/$//')
           username=$(basename "$clean")
           echo "USERNAME=$username" >> $GITHUB_ENV
-          echo "Using username: $username"
 
-      # ----------------------------------------------------------------
-      # 1. Get list of post shortcodes using instaloader + free proxy
-      # ----------------------------------------------------------------
-      - name: Fetch post list with proxy rotation
-        env:
-          MAX_POSTS: ${{ inputs.max_posts }}
+      # ---------------------------------------------------------------
+      # 1. Scrape profile page HTML to extract post shortcodes
+      # ---------------------------------------------------------------
+      - name: Extract post shortcodes from profile page
         run: |
-          cat << 'PYEOF' > fetch_posts.py
-          import os, sys, random, time, json, subprocess, re
+          cat << 'PYEOF' > get_shortcodes.py
+          import os, sys, json, re, subprocess, random, time
           from urllib.request import urlopen, Request
 
           USERNAME = os.environ["USERNAME"]
           MAX_POSTS = int(os.environ.get("MAX_POSTS", "0")) or None
 
-          # ---- Scrape fresh free proxies (https only) ----
+          # ---- Fetch fresh free proxies ----
           def get_proxies():
               proxies = []
               try:
@@ -79,74 +72,101 @@ jobs:
               random.shuffle(proxies)
               return proxies
 
-          # ---- Try to get post shortcodes via instaloader (uses proxy env vars) ----
-          def get_shortcodes(proxy):
-              env = os.environ.copy()
-              env["HTTP_PROXY"] = proxy
-              env["HTTPS_PROXY"] = proxy
-              # instaloader command: print shortcodes without downloading
+          # ---- Download profile page HTML with yt-dlp ----
+          def fetch_profile_html(proxy):
+              # Use yt-dlp to get the page, ignoring media, just the HTML
               cmd = [
-                  "instaloader", "--no-captions", "--no-metadata-json",
-                  "--no-video-thumbnails", "--no-pictures", "--no-videos",
-                  "--quiet", "--post-filter", "None",
-                  "--", USERNAME, "+", "pretty_print", "|", "grep", "-oP", "'(?:https://www\.instagram\.com/p/)\K[^/]+'",
-                  ">", "shortcodes.txt"
+                  "yt-dlp", "--quiet", "--no-warnings",
+                  "--write-pages", "--print-to-file", "after_move:%(url)s;%(filepath)s", "page_dump.txt",
+                  "-o", "-",
+                  f"https://www.instagram.com/{USERNAME}/"
               ]
-              # Simpler: use Python API
+              if proxy:
+                  cmd.insert(1, "--proxy")
+                  cmd.insert(2, proxy)
               try:
-                  import instaloader
-                  loader = instaloader.Instaloader(
-                      download_pictures=False, download_videos=False,
-                      download_video_thumbnails=False, save_metadata=False,
-                      max_connection_attempts=2, request_timeout=30
-                  )
-                  loader.context._session.proxies.update({
-                      "http": proxy, "https": proxy
-                  })
-                  profile = instaloader.Profile.from_username(loader.context, USERNAME)
-                  codes = []
-                  for post in profile.get_posts():
-                      if MAX_POSTS and len(codes) >= MAX_POSTS:
-                          break
-                      codes.append(post.shortcode)
-                  return codes
-              except Exception as e:
-                  print(f"instaloader failed with proxy {proxy}: {e}")
+                  # Actually, easier: use requests
+                  import requests
+                  session = requests.Session()
+                  session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"})
+                  if proxy:
+                      session.proxies.update({"http": proxy, "https": proxy})
+                  r = session.get(f"https://www.instagram.com/{USERNAME}/", timeout=20)
+                  if r.status_code == 200:
+                      return r.text
+              except: pass
+              return None
+
+          # ---- Extract shortcodes from HTML ----
+          def extract_shortcodes(html):
+              # Find window.__INITIAL_STATE__ or window._sharedData
+              match = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});</script>', html, re.DOTALL)
+              if not match:
+                  match = re.search(r'window\._sharedData\s*=\s*({.*?});</script>', html, re.DOTALL)
+              if not match:
                   return None
+              try:
+                  data = json.loads(match.group(1))
+                  # Path may vary, but try user profile posts
+                  user_data = data.get("entry_data", {}).get("ProfilePage", [{}])[0].get("graphql", {}).get("user", {})
+                  if not user_data:
+                      # Alternative path
+                      user_data = data.get("config", {}).get("viewer", {})
+                  edges = user_data.get("edge_owner_to_timeline_media", {}).get("edges", [])
+                  if not edges:
+                      edges = user_data.get("edge_owner_to_timeline_media_v2", {}).get("edges", [])
+                  codes = []
+                  for e in edges:
+                      node = e.get("node", {})
+                      code = node.get("shortcode")
+                      if code:
+                          codes.append(code)
+                  return codes
+              except: return None
 
           # ---- Main ----
           proxies = get_proxies()
           codes = None
-          for proxy in proxies + [""]:   # also try direct
-              print(f"Trying proxy: {proxy or 'direct'}")
-              codes = get_shortcodes(proxy)
-              if codes:
-                  break
-              time.sleep(random.uniform(2,5))
+          # Try each proxy + direct
+          for proxy in proxies + [None]:
+              pstr = proxy or "direct"
+              print(f"Trying to fetch profile with proxy: {pstr}")
+              html = fetch_profile_html(proxy)
+              if html:
+                  codes = extract_shortcodes(html)
+                  if codes:
+                      print(f"Extracted {len(codes)} shortcodes using {pstr}")
+                      break
+                  else:
+                      print("No shortcodes found in HTML.")
+              else:
+                  print("Failed to fetch profile page.")
+              time.sleep(random.uniform(1,3))
           if not codes:
-              print("Could not fetch any post list. Exiting.")
+              print("Could not retrieve any post list. Exiting.")
               sys.exit(1)
+          if MAX_POSTS:
+              codes = codes[:MAX_POSTS]
           with open("shortcodes.txt", "w") as f:
               for c in codes:
                   f.write(c + "\n")
           print(f"Saved {len(codes)} shortcodes.")
           PYEOF
-          python fetch_posts.py
+          python get_shortcodes.py
 
-      # ----------------------------------------------------------------
-      # 2. Download each post using yt-dlp with free proxy rotation
-      # ----------------------------------------------------------------
-      - name: Download media with yt-dlp
+      # ---------------------------------------------------------------
+      # 2. Download each post with yt-dlp + free proxy rotation
+      # ---------------------------------------------------------------
+      - name: Download posts media
         run: |
-          cat << 'PYEOF' > download_media.py
-          import os, random, time, subprocess, sys, json
+          cat << 'PYEOF' > download_posts.py
+          import os, sys, random, time, subprocess, json
           from urllib.request import urlopen, Request
 
           USERNAME = os.environ["USERNAME"]
           OUTPUT = USERNAME
           os.makedirs(OUTPUT, exist_ok=True)
 
-          # read shortcodes
           with open("shortcodes.txt") as f:
               codes = [l.strip() for l in f if l.strip()]
 
@@ -154,7 +174,7 @@ jobs:
               print("No shortcodes to download.")
               sys.exit(0)
 
-          # free proxy fetcher (same as before)
+          # ---- Free proxy fetcher ----
           def get_proxies():
               proxies = []
               try:
@@ -179,13 +199,11 @@ jobs:
 
           proxies_pool = get_proxies()
 
-          # Download function with yt-dlp
           def download_post(shortcode, proxy=None):
               url = f"https://www.instagram.com/p/{shortcode}/"
               cmd = [
                   "yt-dlp",
-                  "--quiet",
-                  "--no-warnings",
+                  "--quiet", "--no-warnings",
                   "--output", f"{OUTPUT}/%(upload_date)s_%(id)s.%(ext)s",
                   "--download-archive", f"{OUTPUT}/archive.txt",
                   "--merge-output-format", "mp4",
@@ -198,36 +216,39 @@ jobs:
               if proxy:
                   cmd.insert(1, "--proxy")
                   cmd.insert(2, proxy)
-              result = subprocess.run(cmd, capture_output=True, timeout=120)
-              if result.returncode != 0:
-                  err = result.stderr.decode().strip()
-                  print(f"  Failed: {shortcode} ({err[:80]})")
+              try:
+                  result = subprocess.run(cmd, capture_output=True, timeout=120)
+                  if result.returncode != 0:
+                      err = result.stderr.decode().strip()
+                      print(f"  ❌ Failed: {shortcode} ({err[:80]})")
+                      return False
+                  return True
+              except Exception as e:
+                  print(f"  ❌ Error: {shortcode} ({e})")
                   return False
-              return True
 
-          # Loop with proxy rotation
           for i, code in enumerate(codes):
-              print(f"Downloading {i+1}/{len(codes)}: {code}")
+              print(f"⬇️  Downloading {i+1}/{len(codes)}: {code}")
               success = False
-              # Try a few proxies
-              for proxy in random.sample(proxies_pool, min(3, len(proxies_pool))):
+              # Try up to 3 random proxies from the pool
+              sample = random.sample(proxies_pool, min(3, len(proxies_pool)))
+              for proxy in sample:
                   if download_post(code, proxy):
                       success = True
                       break
                   time.sleep(random.uniform(2,5))
               if not success:
-                  # last attempt without proxy
                   if download_post(code, None):
                       success = True
               if not success:
-                  print(f"  Gave up on {code}")
-              time.sleep(random.uniform(3,7))   # human delay
+                  print(f"  💀 Gave up on {code}")
+              time.sleep(random.uniform(3,7))
           PYEOF
-          python download_media.py
+          python download_posts.py
 
-      # ----------------------------------------------------------------
-      # 3. Commit everything to repo
-      # ----------------------------------------------------------------
+      # ---------------------------------------------------------------
+      # 3. Commit
+      # ---------------------------------------------------------------
       - name: Commit and push
         if: always()
         run: |
@@ -242,7 +263,7 @@ jobs:
           if git diff-index --quiet HEAD; then
             echo "No new files to commit."
           else
-            git commit -m "Download posts for $USERNAME [$(date +%F)]"
+            git commit -m "Update posts for $USERNAME [$(date +%F)]"
             git push origin HEAD
-            echo "✅ Media pushed to repo!"
+            echo "✅ Media pushed!"
           fi
