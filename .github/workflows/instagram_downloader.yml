@@ -35,7 +35,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-apify-v2
+          key: ${{ runner.os }}-pip-apify-v3
           restore-keys: |
             ${{ runner.os }}-pip-
 
@@ -44,7 +44,7 @@ jobs:
           pip install --upgrade pip
           pip install apify-client requests
 
-      # ── Inline archiver script (v3 API + proxy downloads) ──────────────
+      # ── Inline archiver script (corrected v3 API) ─────────────────────
       - name: Create archiver script
         run: |
           cat << 'PYEOF' > archiver.py
@@ -105,13 +105,14 @@ jobs:
           # ── Apify client ──────────────────────────────────────────────
           client = ApifyClient(APIFY_TOKEN)
 
-          # ── Step 1: Profile scraper (v3 start + wait_for_finish) ──────
+          # ── Step 1: Profile scraper (v3 start + wait) ─────────────────
           log(f"Fetching profile info for @{TARGET} ...")
           profile_actor = client.actor("apify/instagram-profile-scraper")
           profile_run_obj = profile_actor.start(
               run_input={"usernames": [TARGET]}
           )
-          profile_run = profile_run_obj.wait_for_finish(wait_secs=120)
+          # ✅ FIX: use wait() not wait_for_finish()
+          profile_run = profile_run_obj.wait(wait_secs=120)
 
           profile_data = {}
           for item in client.dataset(profile_run["defaultDatasetId"]).iterate_items():
@@ -147,7 +148,7 @@ jobs:
               download_file(pic_url, ROOT / "profile_picture.jpg", "profile picture")
               log("Profile picture saved.")
 
-          # ── Step 2: Posts scraper (v3 start + wait_for_finish) ────────
+          # ── Step 2: Posts scraper (v3 start + wait) ───────────────────
           log(f"Fetching posts (limit={'ALL' if MAX_POSTS == 0 else MAX_POSTS}) ...")
           run_input = {
               "directUrls": [f"https://www.instagram.com/{TARGET}/"],
@@ -161,7 +162,8 @@ jobs:
               run_input=run_input,
               options={"memory_mbytes": 1024}
           )
-          posts_run = posts_run_obj.wait_for_finish(wait_secs=3600)
+          # ✅ FIX: use wait() not wait_for_finish()
+          posts_run = posts_run_obj.wait(wait_secs=3600)
           log("Apify run complete. Downloading media files...")
 
           # ── Step 3: Process posts ────────────────────────────────────
@@ -373,7 +375,7 @@ jobs:
           MAX_POSTS: ${{ github.event.inputs.max_posts }}
           APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
           APIFY_PROXY_PASSWORD: ${{ secrets.APIFY_PROXY_PASSWORD }}
-          # Optional: override default proxy settings if needed
+          # Proxy settings (optional overrides)
           APIFY_PROXY_HOST: proxy.apify.com
           APIFY_PROXY_PORT: 8000
           APIFY_PROXY_USER: auto
