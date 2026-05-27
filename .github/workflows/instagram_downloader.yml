@@ -1,302 +1,208 @@
-name: Instagram Scraper - Public Sources Only
+name: Instagram Posts Archiver
 
 on:
   workflow_dispatch:
     inputs:
-      profile_link:
-        description: 'Public profile URL'
+      username:
+        description: 'Instagram username (without @)'
         required: true
         type: string
-      max_items:
-        description: 'Max items (0 = all)'
-        default: '0'
-        required: false
-        type: string
-
-permissions:
-  contents: write
-
-env:
-  PYTHONUNBUFFERED: 1
 
 jobs:
-  scrape:
+  archive-posts:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
-
+    
+    permissions:
+      contents: write
+      
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Install deps
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
         run: |
-          pip install -q yt-dlp requests beautifulsoup4
+          python -m pip install --upgrade pip
+          pip install instagrapi pillow
 
-      - name: Setup
+      - name: Download Instagram posts
+        id: download
         run: |
-          url="${{ inputs.profile_link }}"
-          clean=$(echo "$url" | sed -E 's/[?#].*//; s/\/$//')
-          username=$(basename "$clean")
-          echo "USERNAME=$username" >> $GITHUB_ENV
-          echo "MAX_ITEMS=${{ inputs.max_items }}" >> $GITHUB_ENV
-          mkdir -p "$username/posts" "$username/reels"
-
-      - name: Extract shortcodes from public sources
-        run: |
-          USERNAME="${{ env.USERNAME }}"
-          CODES_FILE="shortcodes.txt"
-          > "$CODES_FILE"
-
-          python3 << 'PYEOF'
-          import urllib.request, urllib.parse, re, json, sys, os
-          from html.parser import HTMLParser
-
-          username = os.environ.get('USERNAME', '')
-          if not username:
-              sys.exit(1)
-
-          all_codes = set()
-          hdr = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'}
-
-          def fetch(url, timeout=15):
-              try:
-                  req = urllib.request.Request(url, headers=hdr)
-                  return urllib.request.urlopen(req, timeout=timeout).read().decode('utf-8', errors='replace')
-              except:
-                  return None
-
-          def extract_codes(text, prefix=r'(?:p|reel)'):
-              return set(re.findall(rf'instagram\.com/{prefix}/([A-Za-z0-9_-]{{11,}})', text or ''))
-
-          # SOURCE 1: SocialBlade (public Instagram stats page - sometimes has links)
-          print("[1/6] SocialBlade...")
-          html = fetch(f'https://socialblade.com/instagram/user/{username}')
-          if html:
-              codes = extract_codes(html)
-              all_codes.update(codes)
-              print(f"  -> {len(codes)} codes")
-
-          # SOURCE 2: Dumpor (public Instagram viewer - sometimes works)
-          print("[2/6] Dumpor...")
-          html = fetch(f'https://dumpor.com/v/{username}')
-          if html:
-              codes = extract_codes(html)
-              all_codes.update(codes)
-              print(f"  -> {len(codes)} codes")
-
-          # SOURCE 3: Imginn (public Instagram viewer)
-          print("[3/6] Imginn...")
-          html = fetch(f'https://imginn.com/{username}/')
-          if html:
-              codes = extract_codes(html)
-              all_codes.update(codes)
-              print(f"  -> {len(codes)} codes")
-
-          # SOURCE 4: Bibliogram (open source Instagram front-end)
-          print("[4/6] Bibliogram...")
-          for instance in ['https://bibliogram.art/u/{u}', 'https://bibliogram.snopyta.org/u/{u}', 'https://bibliogram.pussthecat.org/u/{u}']:
-              html = fetch(instance.format(u=username))
-              if html:
-                  codes = extract_codes(html)
-                  all_codes.update(codes)
-                  if codes:
-                      print(f"  -> {len(codes)} codes from {instance.split('/')[2]}")
-                      break
-
-          # SOURCE 5: Google Images search
-          print("[5/6] Google Images...")
-          q = urllib.parse.quote(f'instagram {username}')
-          html = fetch(f'https://www.google.com/search?q={q}&tbm=isch')
-          if html:
-              # Google Images embed URLs that point to Instagram
-              codes = set(re.findall(r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]{11,})', html))
-              all_codes.update(codes)
-              print(f"  -> {len(codes)} codes")
-
-          # SOURCE 6: Try yt-dlp with --extractor-args
-          print("[6/6] yt-dlp with mobile extractor...")
-          import subprocess
-          for ua in [
-              'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X)',
-              'Mozilla/5.0 (Linux; Android 14)',
-          ]:
-              try:
-                  result = subprocess.run([
-                      'yt-dlp', '--flat-playlist', '--dump-json',
-                      '--no-warnings', '--ignore-errors',
-                      '--extractor-args', 'instagram:web_search=google',
-                      '--user-agent', ua,
-                      f'https://www.instagram.com/{username}/'
-                  ], capture_output=True, text=True, timeout=30)
-                  if result.stdout:
-                      for line in result.stdout.strip().split('\n'):
-                          if not line: continue
-                          try:
-                              d = json.loads(line)
-                              c = d.get('id') or d.get('shortcode')
-                              if c: all_codes.add(c)
-                          except: pass
-                      print(f"  -> {len(all_codes)} total after yt-dlp")
-                      break
-              except:
-                  continue
-
-          final = sorted(all_codes)
-          print(f"\nTOTAL: {len(final)} shortcodes")
-          for c in final:
-              print(c)
-
-          PYEOF > "$CODES_FILE"
-
-          # But stdout went to file, let me fix that...
-          python3 << 'PYEOF2' > "$CODES_FILE"
-          import urllib.request, urllib.parse, re, json, sys, os, subprocess
-
-          username = os.environ.get('USERNAME', '')
-          if not username:
-              sys.exit(1)
-
-          all_codes = set()
-          hdr = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-
-          def fetch(url, timeout=12):
-              try:
-                  req = urllib.request.Request(url, headers=hdr)
-                  return urllib.request.urlopen(req, timeout=timeout).read().decode('utf-8', errors='replace')
-              except:
-                  return None
-
-          def extract_codes(text, prefix=r'(?:p|reel)'):
-              return set(re.findall(rf'instagram\.com/{prefix}/([A-Za-z0-9_-]{{11,}})', text or ''))
-
-          # Sources
-          sources = [
-              ('SocialBlade', f'https://socialblade.com/instagram/user/{username}'),
-              ('Imginn', f'https://imginn.com/{username}/'),
-              ('Dumpor', f'https://dumpor.com/v/{username}'),
-          ]
-          for name, url in sources:
-              html = fetch(url)
-              if html:
-                  codes = extract_codes(html)
-                  all_codes.update(codes)
-
-          # Bibliogram instances
-          for inst in ['bibliogram.art', 'bibliogram.snopyta.org', 'bibliogram.pussthecat.org']:
-              html = fetch(f'https://{inst}/u/{username}')
-              if html:
-                  codes = extract_codes(html)
-                  all_codes.update(codes)
-                  if codes:
-                      break
-
-          # Google search
-          q = urllib.parse.quote(f'instagram.com/{username}')
-          html = fetch(f'https://www.google.com/search?q={q}&num=100')
-          if html:
-              all_codes.update(extract_codes(html))
-
-          # yt-dlp
+          python << 'EOF'
+          import os
+          import json
+          from datetime import datetime
+          from pathlib import Path
+          from instagrapi import Client
+          
+          # Initialize client
+          cl = Client()
+          
+          # Credentials from GitHub secrets
+          username = "${{ github.event.inputs.username }}"
+          ig_username = "${{ secrets.INSTAGRAM_USERNAME }}"
+          ig_password = "${{ secrets.INSTAGRAM_PASSWORD }}"
+          
+          # Create archive directory
+          archive_dir = Path("instagram_archive")
+          archive_dir.mkdir(exist_ok=True)
+          
+          # Create user subdirectory
+          user_dir = archive_dir / username
+          user_dir.mkdir(exist_ok=True)
+          
+          # Create media directory
+          media_dir = user_dir / "media"
+          media_dir.mkdir(exist_ok=True)
+          
           try:
-              result = subprocess.run([
-                  'yt-dlp', '--flat-playlist', '--dump-json',
-                  '--no-warnings', '--ignore-errors',
-                  '--extractor-args', 'instagram:web_search=google',
-                  '--user-agent', 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X)',
-                  f'https://www.instagram.com/{username}/'
-              ], capture_output=True, text=True, timeout=30)
-              if result.stdout:
-                  for line in result.stdout.strip().split('\n'):
-                      if not line: continue
-                      try:
-                          d = json.loads(line)
-                          c = d.get('id') or d.get('shortcode')
-                          if c: all_codes.add(c)
-                      except: pass
-          except:
-              pass
+              print(f"Logging in to Instagram as {ig_username}...")
+              cl.login(ig_username, ig_password)
+              
+              print(f"Fetching posts from @{username}...")
+              user = cl.user_info_by_username(username)
+              user_id = user.pk
+              
+              # Get all posts
+              medias = cl.user_medias(user_id)
+              
+              posts_data = []
+              
+              print(f"Found {len(medias)} posts. Downloading...")
+              
+              for idx, media in enumerate(medias, 1):
+                  post_info = {
+                      "id": media.id,
+                      "caption": media.caption,
+                      "timestamp": media.taken_at.isoformat() if media.taken_at else None,
+                      "likes": media.like_count,
+                      "comments": media.comment_count,
+                      "media_type": media.media_type,
+                      "url": media.link,
+                      "media_files": []
+                  }
+                  
+                  # Download images/videos
+                  if media.media_type == 1:  # Photo
+                      filename = f"post_{media.id}_photo.jpg"
+                      filepath = media_dir / filename
+                      
+                      if not filepath.exists():
+                          with open(filepath, 'wb') as f:
+                              f.write(media.get_file().read())
+                      
+                      post_info["media_files"].append(filename)
+                      print(f"[{idx}] Downloaded photo: {filename}")
+                      
+                  elif media.media_type == 2:  # Video
+                      filename = f"post_{media.id}_video.mp4"
+                      filepath = media_dir / filename
+                      
+                      if not filepath.exists():
+                          with open(filepath, 'wb') as f:
+                              f.write(media.get_file().read())
+                      
+                      post_info["media_files"].append(filename)
+                      print(f"[{idx}] Downloaded video: {filename}")
+                      
+                  elif media.media_type == 8:  # Album (carousel)
+                      for res_idx, resource in enumerate(media.resources, 1):
+                          if resource.media_type == 1:
+                              filename = f"post_{media.id}_carousel_{res_idx}.jpg"
+                          else:
+                              filename = f"post_{media.id}_carousel_{res_idx}.mp4"
+                          
+                          filepath = media_dir / filename
+                          
+                          if not filepath.exists():
+                              with open(filepath, 'wb') as f:
+                                  f.write(resource.get_file().read())
+                          
+                          post_info["media_files"].append(filename)
+                      print(f"[{idx}] Downloaded carousel with {len(media.resources)} items")
+                  
+                  posts_data.append(post_info)
+              
+              # Save metadata as JSON
+              metadata_file = user_dir / "posts_metadata.json"
+              with open(metadata_file, 'w', encoding='utf-8') as f:
+                  json.dump(posts_data, f, indent=2, ensure_ascii=False)
+              
+              print(f"\nâœ… Successfully archived {len(posts_data)} posts!")
+              print(f"ðŸ“ Saved to: {user_dir}")
+              
+              # Set output for next step
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"posts_count={len(posts_data)}\n")
+                  f.write(f"user_dir={user_dir}\n")
+              
+          except Exception as e:
+              print(f"âŒ Error: {str(e)}")
+              raise
+          finally:
+              try:
+                  cl.logout()
+              except:
+                  pass
+          
+          EOF
 
-          for c in sorted(all_codes):
-              print(c)
-
-          PYEOF2
-
-      - name: Check results
+      - name: Create README
         run: |
-          if [ ! -s "shortcodes.txt" ]; then
-            echo "No shortcodes found for ${{ env.USERNAME }}"
-            echo ""
-            echo "This account is fully locked behind Instagram's login wall."
-            echo "No public tool can scrape it without credentials."
-            echo ""
-            echo "To download @${{ env.USERNAME }} content, you MUST:"
-            echo "1. Go to: Settings > Secrets and variables > Actions"
-            echo "2. Add Variable: INSTA_USERNAME = your_instagram_username"
-            echo "3. Add Secret: INSTA_PASSWORD = your_instagram_password"
-            echo ""
-            echo "Or try this tool on a different public account."
-            exit 0
+          cat > instagram_archive/${{ github.event.inputs.username }}/README.md << 'EOF'
+          # Instagram Archive: ${{ github.event.inputs.username }}
+          
+          **Archived on:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          **Total Posts:** ${{ steps.download.outputs.posts_count }}
+          
+          ## Contents
+          - `media/` - Downloaded images and videos
+          - `posts_metadata.json` - Post metadata (captions, likes, timestamps, etc.)
+          
+          ## File Structure
+          ```
+          instagram_archive/${{ github.event.inputs.username }}/
+          â”œâ”€â”€ README.md
+          â”œâ”€â”€ posts_metadata.json
+          â””â”€â”€ media/
+              â”œâ”€â”€ post_[id]_photo.jpg
+              â”œâ”€â”€ post_[id]_video.mp4
+              â””â”€â”€ ...
+          ```
+          
+          ## Notes
+          - This archive is created automatically by GitHub Actions
+          - Please respect Instagram's Terms of Service
+          - Images and videos are your own content
+          
+          EOF
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git.config user.email "actions@github.com"
+          
+          git add instagram_archive/
+          
+          if git diff --quiet --cached; then
+            echo "âœ… No new posts to commit"
+          else
+            git commit -m "Archive: Add Instagram posts from @${{ github.event.inputs.username }} on $(date -u +'%Y-%m-%d')"
+            git push
+            echo "âœ… Pushed to repository"
           fi
-          echo "Found $(wc -l < shortcodes.txt) shortcodes"
 
-      - name: Download media
-        if: hashFiles('shortcodes.txt') != ''
-        run: |
-          USERNAME="${{ env.USERNAME }}"
-          if [ ! -s "shortcodes.txt" ]; then exit 0; fi
-          
-          TOTAL=$(wc -l < "shortcodes.txt")
-          SUCCESS=0
-          FAIL=0
-          COUNT=0
-          
-          while IFS= read -r CODE; do
-            [ -z "$CODE" ] && continue
-            COUNT=$((COUNT+1))
-            printf "[%d/%d] %s " "$COUNT" "$TOTAL" "$CODE"
-            
-            if yt-dlp --quiet --no-warnings --restrict-filenames \
-              --output "$USERNAME/posts/%(upload_date)s_%(id)s.%(ext)s" \
-              --download-archive "$USERNAME/archive.txt" \
-              --merge-output-format mp4 \
-              --no-overwrites --continue \
-              --retries 5 \
-              "https://www.instagram.com/p/$CODE/" 2>/dev/null; then
-              SUCCESS=$((SUCCESS+1)); echo "OK"
-            elif yt-dlp --quiet --no-warnings --restrict-filenames \
-              --output "$USERNAME/reels/%(upload_date)s_%(id)s.%(ext)s" \
-              --download-archive "$USERNAME/archive.txt" \
-              --merge-output-format mp4 \
-              --no-overwrites --continue \
-              --retries 5 \
-              "https://www.instagram.com/reel/$CODE/" 2>/dev/null; then
-              SUCCESS=$((SUCCESS+1)); echo "OK"
-            else
-              FAIL=$((FAIL+1)); echo "FAIL"
-            fi
-            sleep 2
-          done < "shortcodes.txt"
-          
-          echo "Done: $SUCCESS OK, $FAIL failed"
-
-      - name: Push
+      - name: Workflow summary
         if: always()
         run: |
-          USERNAME="${{ env.USERNAME }}"
-          if [ ! -d "$USERNAME" ]; then exit 0; fi
-          
-          POST_COUNT=$(find "$USERNAME/posts" -type f 2>/dev/null | wc -l)
-          REEL_COUNT=$(find "$USERNAME/reels" -type f 2>/dev/null | wc -l)
-          TOTAL_SIZE=$(find "$USERNAME" -type f ! -name "archive.txt" ! -name "download_report.json" -exec stat --format='%s' {} + 2>/dev/null | awk '{s+=$1} END {printf "%.2f", s/1024/1024}')
-          
-          jq -n --arg u "$USERNAME" --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson p "${POST_COUNT:-0}" --argjson r "${REEL_COUNT:-0}" --argjson t "$((POST_COUNT + REEL_COUNT))" --argjson s "${TOTAL_SIZE:-0}" '{username: $u, date: $d, posts_downloaded: $p, reels_downloaded: $r, total_items: $t, total_size_mb: $s}' > "$USERNAME/download_report.json"
-          
-          git config user.name "IG-Bot"
-          git config user.email "bot@localhost"
-          git add "$USERNAME/posts/" "$USERNAME/reels/" "$USERNAME/download_report.json"
-          git reset -- "$USERNAME/archive.txt" 2>/dev/null || true
-          
-          if ! git diff-index --quiet HEAD; then
-            git commit -m "Media: @$USERNAME $(date +%Y-%m-%d)"
-            git push origin HEAD
-          fi
+          echo "## ðŸ“¸ Instagram Archive Workflow" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Username:** @${{ github.event.inputs.username }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Posts Archived:** ${{ steps.download.outputs.posts_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** âœ… Complete" >> $GITHUB_STEP_SUMMARY
