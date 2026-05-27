@@ -1,255 +1,241 @@
 """
-Instagram Public Archiver — Session cookie auth to bypass 429
-No password stored. Only accesses public profile data.
+Instagram Public Archiver — powered by Apify
+No Instagram login. No cookies. Username only.
+Requires: pip install apify-client requests
 """
 
-import os, json, sys, time, shutil, urllib.request
+import os, sys, json, time, urllib.request, urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
 
-import instaloader
-from instaloader.exceptions import (
-    ProfileNotExistsException,
-    InstaloaderException,
-    QueryReturnedNotFoundException,
-)
+# ── Auto-install ───────────────────────────────────────────────────────────────
+try:
+    from apify_client import ApifyClient
+except ImportError:
+    import subprocess
+    subprocess.run([sys.executable, "-m", "pip", "install",
+                    "apify-client", "requests", "-q"], check=True)
+    from apify_client import ApifyClient
 
-# ── Config ────────────────────────────────────────────────────────────────────
-TARGET     = os.environ["TARGET"].strip().lstrip("@")
-MAX_POSTS  = int(os.environ.get("MAX_POSTS", "0"))
-DL_VIDEOS  = os.environ.get("DL_VIDEOS", "true").lower() == "true"
-DL_REELS   = os.environ.get("DL_REELS", "true").lower() == "true"
-DL_TAGGED  = os.environ.get("DL_TAGGED", "false").lower() == "true"
-SESSION_ID = os.environ.get("IG_SESSION_ID", "").strip()  # cookie only, no password
+# ── Config ─────────────────────────────────────────────────────────────────────
+TARGET     = os.environ.get("TARGET", "").strip().lstrip("@")
+MAX_POSTS  = int(os.environ.get("MAX_POSTS", "0"))   # 0 = all
+APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "").strip()
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-ARCHIVE_ROOT = Path("instagram_archive") / TARGET
-MEDIA_DIR    = ARCHIVE_ROOT / "media"
-ARCHIVE_ROOT.mkdir(parents=True, exist_ok=True)
-MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+if not TARGET:
+    print("ERROR: TARGET username is not set.")
+    sys.exit(1)
+if not APIFY_TOKEN:
+    print("ERROR: APIFY_TOKEN secret is not set.")
+    print("  → Go to https://apify.com → Sign up free → Settings → API tokens")
+    sys.exit(1)
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Paths ──────────────────────────────────────────────────────────────────────
+ROOT  = Path("instagram_archive") / TARGET
+MEDIA = ROOT / "media"
+ROOT.mkdir(parents=True, exist_ok=True)
+MEDIA.mkdir(parents=True, exist_ok=True)
+
 def log(msg):
     print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}", flush=True)
 
-# ── Instaloader ───────────────────────────────────────────────────────────────
-L = instaloader.Instaloader(
-    dirname_pattern=str(MEDIA_DIR),
-    filename_pattern="{shortcode}",
-    download_pictures=True,
-    download_videos=DL_VIDEOS,
-    download_video_thumbnails=False,
-    download_geotags=False,
-    download_comments=False,
-    save_metadata=False,
-    post_metadata_txt_pattern="",
-    compress_json=False,
-    quiet=True,
-    sleep=True,
-    max_connection_attempts=5,
-    request_timeout=60,
+def download_file(url, dest: Path, label=""):
+    if dest.exists():
+        return True
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            dest.write_bytes(r.read())
+        return True
+    except Exception as e:
+        log(f"  Download failed {label}: {e}")
+        return False
+
+# ── Apify client ───────────────────────────────────────────────────────────────
+client = ApifyClient(APIFY_TOKEN)
+
+# ── Step 1: Scrape profile info ────────────────────────────────────────────────
+log(f"Fetching profile info for @{TARGET} ...")
+profile_run = client.actor("apify/instagram-profile-scraper").call(
+    run_input={
+        "usernames": [TARGET],
+    },
+    timeout_secs=120,
 )
 
-# ── Auth: inject session cookie (bypasses 429, no password needed) ─────────
-if SESSION_ID:
-    log("Injecting session cookie...")
-    import http.cookiejar, requests
-    # Build a requests session with the cookie
-    session = requests.Session()
-    session.cookies.set("sessionid", SESSION_ID, domain=".instagram.com")
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "en-US,en;q=0.9",
-        "X-IG-App-ID": "936619743392459",
-    })
-    L.context._session = session
-    log("Session cookie applied.")
+profile_data = {}
+for item in client.dataset(profile_run["defaultDatasetId"]).iterate_items():
+    profile_data = {
+        "username":    item.get("username", TARGET),
+        "full_name":   item.get("fullName", ""),
+        "biography":   item.get("biography", ""),
+        "followers":   item.get("followersCount", 0),
+        "following":   item.get("followsCount", 0),
+        "post_count":  item.get("postsCount", 0),
+        "is_verified": item.get("verified", False),
+        "is_business": item.get("isBusinessAccount", False),
+        "profile_pic": item.get("profilePicUrl", ""),
+        "external_url": item.get("externalUrl", ""),
+        "archived_at": datetime.now(timezone.utc).isoformat(),
+    }
+    break  # only one profile
+
+if not profile_data:
+    log("WARNING: Could not fetch profile info. Proceeding with posts only.")
+    profile_data = {"username": TARGET, "archived_at": datetime.now(timezone.utc).isoformat()}
 else:
-    log("WARNING: No IG_SESSION_ID provided. Requests may be rate-limited (429).")
-    log("         Add your Instagram sessionid cookie as a GitHub secret.")
+    log(f"Profile: {profile_data.get('full_name')} | "
+        f"{profile_data.get('followers', 0):,} followers | "
+        f"{profile_data.get('post_count', 0)} posts")
 
-# ── Load profile ──────────────────────────────────────────────────────────────
-log(f"Loading profile: @{TARGET}")
-try:
-    profile = instaloader.Profile.from_username(L.context, TARGET)
-except ProfileNotExistsException:
-    log(f"ERROR: @{TARGET} does not exist.")
-    sys.exit(1)
-except Exception as e:
-    log(f"ERROR: {e}")
-    sys.exit(1)
-
-if profile.is_private:
-    log("ERROR: This account is private. Only public accounts are supported.")
-    sys.exit(1)
-
-log(f"OK: {profile.full_name} | {profile.followers:,} followers | {profile.mediacount} posts")
-
-# ── Profile metadata ──────────────────────────────────────────────────────────
-profile_data = {
-    "username":       profile.username,
-    "full_name":      profile.full_name,
-    "biography":      profile.biography,
-    "external_url":   str(profile.external_url) if profile.external_url else "",
-    "followers":      profile.followers,
-    "followees":      profile.followees,
-    "post_count":     profile.mediacount,
-    "is_verified":    profile.is_verified,
-    "is_business":    profile.is_business_account,
-    "profile_pic_url": str(profile.profile_pic_url),
-    "archived_at":    datetime.now(timezone.utc).isoformat(),
-}
-with open(ARCHIVE_ROOT / "profile.json", "w", encoding="utf-8") as f:
+with open(ROOT / "profile.json", "w", encoding="utf-8") as f:
     json.dump(profile_data, f, indent=2, ensure_ascii=False)
 
-# ── Profile picture ───────────────────────────────────────────────────────────
-try:
-    pic_path = ARCHIVE_ROOT / "profile_picture.jpg"
-    if not pic_path.exists():
-        urllib.request.urlretrieve(str(profile.profile_pic_url), pic_path)
-        log("Downloaded profile picture.")
-except Exception as e:
-    log(f"Profile picture error: {e}")
+# ── Download profile picture ───────────────────────────────────────────────────
+pic_url = profile_data.get("profile_pic", "")
+if pic_url:
+    download_file(pic_url, ROOT / "profile_picture.jpg", "profile picture")
+    log("Profile picture saved.")
 
-# ── Download posts ─────────────────────────────────────────────────────────────
-log(f"Downloading posts (max={'ALL' if MAX_POSTS == 0 else MAX_POSTS}, videos={DL_VIDEOS})...")
+# ── Step 2: Scrape all posts ───────────────────────────────────────────────────
+log(f"Fetching posts (limit={'ALL' if MAX_POSTS == 0 else MAX_POSTS}) ...")
 
-posts_data = []
-downloaded = skipped = errors = 0
-error_log  = []
-
-TYPE_MAP = {
-    "GraphImage":    "Photo",
-    "GraphSidecar":  "Carousel",
-    "GraphVideo":    "Video/Reel",
+run_input = {
+    "directUrls": [f"https://www.instagram.com/{TARGET}/"],
+    "resultsType": "posts",
+    "resultsLimit": MAX_POSTS if MAX_POSTS > 0 else 999999,
+    "addParentData": False,
 }
 
-for idx, post in enumerate(profile.get_posts(), 1):
-    if MAX_POSTS > 0 and idx > MAX_POSTS:
-        break
+posts_run = client.actor("apify/instagram-scraper").call(
+    run_input=run_input,
+    timeout_secs=3600,
+    memory_mbytes=1024,
+)
 
-    ptype = TYPE_MAP.get(post.typename, post.typename)
-    log(f"[{idx:>4}] {ptype:12s} {post.shortcode}  {post.date_utc.strftime('%Y-%m-%d')}")
+log("Apify run complete. Downloading media files...")
 
-    if post.is_video and not DL_VIDEOS:
-        skipped += 1
-        continue
+# ── Step 3: Download media + build metadata ─────────────────────────────────
+posts_data = []
+downloaded = 0
+errors     = 0
+error_log  = []
+
+items = list(client.dataset(posts_run["defaultDatasetId"]).iterate_items())
+log(f"Found {len(items)} posts to process.")
+
+for idx, item in enumerate(items, 1):
+    shortcode = item.get("shortCode") or item.get("id") or f"post_{idx}"
+    url       = item.get("url") or f"https://www.instagram.com/p/{shortcode}/"
+    ptype     = item.get("type", "GraphImage")
+    type_name = {"GraphImage": "Photo", "GraphVideo": "Video/Reel",
+                 "GraphSidecar": "Carousel"}.get(ptype, ptype)
+    ts        = item.get("timestamp") or item.get("takenAt") or ""
+    date_str  = ts[:10] if ts else "unknown"
+
+    log(f"[{idx:>4}/{len(items)}] {type_name:12s}  {shortcode}  {date_str}")
 
     meta = {
-        "shortcode":  post.shortcode,
-        "permalink":  f"https://www.instagram.com/p/{post.shortcode}/",
-        "caption":    post.caption or "",
-        "timestamp":  post.date_utc.isoformat(),
-        "likes":      post.likes,
-        "comments":   post.comments,
-        "type":       ptype,
-        "is_video":   post.is_video,
-        "location":   post.location.name if post.location else "",
-        "hashtags":   list(post.caption_hashtags) if post.caption_hashtags else [],
-        "mentions":   list(post.caption_mentions) if post.caption_mentions else [],
+        "shortcode":  shortcode,
+        "permalink":  url,
+        "caption":    item.get("caption") or item.get("alt") or "",
+        "timestamp":  ts,
+        "likes":      item.get("likesCount", 0) or item.get("likes", 0),
+        "comments":   item.get("commentsCount", 0) or item.get("comments", 0),
+        "type":       type_name,
+        "is_video":   ptype in ("GraphVideo", "Video"),
+        "location":   (item.get("locationName") or
+                       (item.get("location") or {}).get("name") or ""),
+        "hashtags":   item.get("hashtags", []) or [],
+        "mentions":   item.get("mentions", []) or [],
+        "video_url":  item.get("videoUrl") or "",
         "files":      [],
         "status":     "ok",
     }
 
-    try:
-        L.download_post(post, target=MEDIA_DIR)
-        for ext in ("jpg", "jpeg", "mp4", "webp"):
-            for f in sorted(MEDIA_DIR.glob(f"{post.shortcode}*.{ext}")):
-                if f.name not in meta["files"]:
-                    meta["files"].append(f.name)
+    # ── Collect all media URLs for this post ─────────────────────────────────
+    media_urls = []
+
+    # Carousel / sidecar
+    for img in item.get("images", []):
+        u = img if isinstance(img, str) else img.get("url") or img.get("src", "")
+        if u:
+            media_urls.append(("image", u))
+
+    # Single image
+    display_url = item.get("displayUrl") or item.get("imageUrl") or item.get("thumbnailUrl") or ""
+    if display_url and not media_urls:
+        media_urls.append(("image", display_url))
+
+    # Video
+    video_url = item.get("videoUrl") or ""
+    if video_url:
+        media_urls.append(("video", video_url))
+
+    if not media_urls:
+        log(f"       No media URLs found for {shortcode}")
+        meta["status"] = "no_media_url"
+        posts_data.append(meta)
+        continue
+
+    # ── Download each media file ──────────────────────────────────────────────
+    post_ok = True
+    for mi, (mtype, murl) in enumerate(media_urls, 1):
+        ext  = "mp4" if mtype == "video" else "jpg"
+        fname = (f"{shortcode}.{ext}" if len(media_urls) == 1
+                 else f"{shortcode}_{mi}.{ext}")
+        dest  = MEDIA / fname
+        ok    = download_file(murl, dest, fname)
+        if ok:
+            meta["files"].append(fname)
+        else:
+            post_ok = False
+
+    if meta["files"]:
         downloaded += 1
-    except Exception as e:
-        log(f"       ERROR: {e}")
-        meta["status"] = str(e)
+    else:
         errors += 1
-        error_log.append({"shortcode": post.shortcode, "reason": str(e)})
+        meta["status"] = "download_failed"
+        error_log.append({"shortcode": shortcode, "reason": "all downloads failed"})
 
     posts_data.append(meta)
-    time.sleep(1.5)
-
-# ── Reels ─────────────────────────────────────────────────────────────────────
-if DL_REELS and DL_VIDEOS:
-    log("Checking reels...")
-    seen = {p["shortcode"] for p in posts_data}
-    rcount = 0
-    try:
-        for reel in profile.get_reels():
-            if MAX_POSTS > 0 and rcount >= MAX_POSTS:
-                break
-            if reel.shortcode not in seen:
-                log(f"  Reel: {reel.shortcode}")
-                try:
-                    L.download_post(reel, target=MEDIA_DIR)
-                    rcount += 1
-                    downloaded += 1
-                except Exception as e:
-                    log(f"  Reel error: {e}")
-    except Exception as e:
-        log(f"Reels error: {e}")
-    if rcount:
-        log(f"Downloaded {rcount} extra reels.")
-
-# ── Tagged posts ──────────────────────────────────────────────────────────────
-if DL_TAGGED:
-    tagged_dir = ARCHIVE_ROOT / "tagged"
-    tagged_dir.mkdir(exist_ok=True)
-    tagged_data = []
-    log("Downloading tagged posts...")
-    try:
-        for tp in profile.get_tagged_posts():
-            try:
-                L.download_post(tp, target=tagged_dir)
-                tagged_data.append({
-                    "shortcode": tp.shortcode,
-                    "permalink": f"https://www.instagram.com/p/{tp.shortcode}/",
-                    "timestamp": tp.date_utc.isoformat(),
-                    "owner":     tp.owner_username,
-                })
-            except Exception as e:
-                log(f"  Tagged error: {e}")
-    except Exception as e:
-        log(f"Tagged error: {e}")
-    if tagged_data:
-        with open(ARCHIVE_ROOT / "tagged_metadata.json", "w", encoding="utf-8") as f:
-            json.dump(tagged_data, f, indent=2, ensure_ascii=False)
-        log(f"Tagged posts saved: {len(tagged_data)}")
-
-# ── Clean up sidecar files ────────────────────────────────────────────────────
-for junk in list(MEDIA_DIR.glob("*.json*")) + list(MEDIA_DIR.glob("*.txt")):
-    try: junk.unlink()
-    except Exception: pass
 
 # ── Save metadata ──────────────────────────────────────────────────────────────
-with open(ARCHIVE_ROOT / "posts_metadata.json", "w", encoding="utf-8") as f:
+with open(ROOT / "posts_metadata.json", "w", encoding="utf-8") as f:
     json.dump(posts_data, f, indent=2, ensure_ascii=False)
 if error_log:
-    with open(ARCHIVE_ROOT / "errors.json", "w", encoding="utf-8") as f:
+    with open(ROOT / "errors.json", "w", encoding="utf-8") as f:
         json.dump(error_log, f, indent=2)
 
 # ── HTML Gallery ───────────────────────────────────────────────────────────────
-log("Building gallery.html...")
+log("Building gallery.html ...")
 cards = []
 for post in posts_data:
     if not post["files"]:
         continue
-    first   = post["files"][0]
-    is_vid  = first.endswith(".mp4")
-    cap     = (post["caption"] or "")[:140].replace("<","&lt;").replace(">","&gt;")
-    date    = post["timestamp"][:10]
-    tags    = " ".join(f'<span class="tag">#{t}</span>' for t in post["hashtags"][:5])
-    med     = (f'<video src="media/{first}" controls muted playsinline preload="none"></video>'
-               if is_vid else f'<img src="media/{first}" loading="lazy" alt="">')
-    badge   = (f'<span class="badge">&#x1F5BC; {len(post["files"])}</span>'
-               if post["type"] == "Carousel" else
-               '<span class="badge">&#9654;</span>' if "Video" in post["type"] else "")
+    first  = post["files"][0]
+    is_vid = first.endswith(".mp4")
+    cap    = (post["caption"] or "")[:140].replace("<","&lt;").replace(">","&gt;")
+    date   = post["timestamp"][:10] if post["timestamp"] else ""
+    tags   = " ".join(
+        f'<span class="tag">#{h}</span>'
+        for h in (post["hashtags"] or [])[:5]
+    )
+    med    = (f'<video src="media/{first}" controls muted playsinline preload="none"></video>'
+              if is_vid else f'<img src="media/{first}" loading="lazy" alt="">')
+    badge  = ""
+    if post["type"] == "Carousel":
+        badge = f'<span class="badge">&#x1F5BC; {len(post["files"])}</span>'
+    elif "Video" in post["type"] or "Reel" in post["type"]:
+        badge = '<span class="badge">&#9654;</span>'
     cards.append(f"""<article class="card">
   <a href="{post['permalink']}" target="_blank" class="thumb">{med}{badge}</a>
   <div class="info">
-    <div class="row"><span>&#9829; {post['likes']:,}</span><span>&#128172; {post['comments']:,}</span><time>{date}</time></div>
+    <div class="row">
+      <span>&#9829; {post['likes']:,}</span>
+      <span>&#128172; {post['comments']:,}</span>
+      <time>{date}</time>
+    </div>
     <p class="cap">{cap}{'&hellip;' if len(post['caption'] or '') > 140 else ''}</p>
     <div class="tags">{tags}</div>
   </div>
@@ -257,7 +243,8 @@ for post in posts_data:
 
 html = f"""<!DOCTYPE html>
 <html lang="en"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>@{TARGET} Archive</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
@@ -266,10 +253,10 @@ body{{background:var(--bg);color:var(--t);font-family:-apple-system,BlinkMacSyst
 a{{color:inherit;text-decoration:none}}
 header{{background:var(--s);border-bottom:1px solid var(--b);padding:32px 24px;text-align:center}}
 .avatar{{width:88px;height:88px;border-radius:50%;border:3px solid var(--acc);object-fit:cover;display:block;margin:0 auto 14px}}
-.handle{{font-size:1.4rem;font-weight:700}} .handle em{{color:var(--acc);font-style:normal}}
+.handle{{font-size:1.4rem;font-weight:700}}.handle em{{color:var(--acc);font-style:normal}}
 .fname{{color:var(--m);margin:4px 0 14px;font-size:.95rem}}
 .sbar{{display:flex;justify-content:center;gap:36px;margin-bottom:12px}}
-.sbar div{{text-align:center}} .sbar strong{{display:block;font-size:1.1rem}}
+.sbar div{{text-align:center}}.sbar strong{{display:block;font-size:1.1rem}}
 .sbar small{{color:var(--m);font-size:.72rem;text-transform:uppercase;letter-spacing:.04em}}
 .bio{{max-width:420px;margin:0 auto;color:#aaa;font-size:.88rem;line-height:1.5}}
 .chips{{display:flex;justify-content:center;gap:10px;margin:18px 0 0;flex-wrap:wrap}}
@@ -283,7 +270,7 @@ header{{background:var(--s);border-bottom:1px solid var(--b);padding:32px 24px;t
 .card:hover .thumb img,.card:hover .thumb video{{transform:scale(1.04)}}
 .badge{{position:absolute;top:8px;right:8px;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);border-radius:6px;padding:3px 9px;font-size:.72rem}}
 .info{{padding:12px 14px 14px}}
-.row{{display:flex;gap:12px;font-size:.78rem;color:var(--m);margin-bottom:6px}} time{{margin-left:auto}}
+.row{{display:flex;gap:12px;font-size:.78rem;color:var(--m);margin-bottom:6px}}time{{margin-left:auto}}
 .cap{{font-size:.82rem;color:#ccc;line-height:1.45;word-break:break-word;max-height:3.6em;overflow:hidden}}
 .tags{{margin-top:7px;display:flex;flex-wrap:wrap;gap:5px}}
 .tag{{font-size:.7rem;color:var(--acc);background:rgba(225,48,108,.1);border-radius:4px;padding:1px 6px}}
@@ -296,12 +283,12 @@ footer a{{color:var(--acc)}}
   <div class="fname">{profile_data.get('full_name','')}</div>
   <div class="sbar">
     <div><strong>{profile_data.get('followers',0):,}</strong><small>Followers</small></div>
-    <div><strong>{profile_data.get('followees',0):,}</strong><small>Following</small></div>
+    <div><strong>{profile_data.get('following',0):,}</strong><small>Following</small></div>
     <div><strong>{profile_data.get('post_count',0):,}</strong><small>Posts</small></div>
   </div>
   <p class="bio">{(profile_data.get('biography') or '').replace(chr(10),' ')}</p>
   <div class="chips">
-    <div class="chip">Saved <b>{downloaded}</b></div>
+    <div class="chip">Downloaded <b>{downloaded}</b></div>
     <div class="chip">Errors <b>{errors}</b></div>
     <div class="chip">Date <b>{datetime.now(timezone.utc).strftime('%Y-%m-%d')}</b></div>
     {'<div class="chip">&#10003; Verified</div>' if profile_data.get('is_verified') else ''}
@@ -309,32 +296,30 @@ footer a{{color:var(--acc)}}
 </header>
 <div class="grid">{''.join(cards)}</div>
 <footer>
-  Public archive &bull; {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} &bull;
+  Archive &bull; {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} &bull;
   <a href="posts_metadata.json">JSON</a> &bull;
   <a href="https://www.instagram.com/{TARGET}/" target="_blank">Instagram</a>
-</footer>
-</body></html>"""
+</footer></body></html>"""
 
-with open(ARCHIVE_ROOT / "gallery.html", "w", encoding="utf-8") as f:
+with open(ROOT / "gallery.html", "w", encoding="utf-8") as f:
     f.write(html)
 
-# ── Summary ───────────────────────────────────────────────────────────────────
-log("")
-log("=" * 52)
-log(f"  @{TARGET}")
-log(f"  Posts processed : {len(posts_data)}")
-log(f"  Files saved     : {downloaded}")
-log(f"  Skipped         : {skipped}")
-log(f"  Errors          : {errors}")
-log("=" * 52)
+# ── Summary ────────────────────────────────────────────────────────────────────
+print("\n" + "═"*52)
+log(f"DONE  @{TARGET}")
+log(f"  Posts found  : {len(items)}")
+log(f"  Files saved  : {downloaded}")
+log(f"  Errors       : {errors}")
+log(f"  Gallery      : {ROOT}/gallery.html")
+print("═"*52)
 
 gho = os.environ.get("GITHUB_OUTPUT", "")
 if gho:
     with open(gho, "a") as f:
-        f.write(f"posts_count={len(posts_data)}\n")
+        f.write(f"posts_count={len(items)}\n")
         f.write(f"files_saved={downloaded}\n")
         f.write(f"errors={errors}\n")
 
-if downloaded == 0 and len(posts_data) > 0:
-    log("FATAL: Posts found but nothing downloaded.")
+if errors > 0 and downloaded == 0:
+    log("FATAL: Nothing downloaded.")
     sys.exit(1)
