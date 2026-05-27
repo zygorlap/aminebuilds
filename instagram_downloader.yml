@@ -1,64 +1,75 @@
-name: Bulk Download Instagram Content
+name: Instagram Public Archiver
 
 on:
-  # Allows you to manually trigger this run from the Actions tab
   workflow_dispatch:
     inputs:
       target_username:
-        description: 'The Instagram username to download (Public profiles only)'
+        description: "Public Instagram username (without @)"
         required: true
         type: string
-      download_reels:
-        description: 'Download Reels/IGTV as well?'
-        required: true
-        type: boolean
-        default: true
+      max_posts:
+        description: "Max posts to download (0 = ALL)"
+        required: false
+        default: "0"
+        type: string
 
 jobs:
-  download-instagram:
+  archive:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    permissions:
+      contents: write
 
     steps:
-    # Step 1: Check out the repository
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # Step 2: Set up Python
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-python-version: '3.10'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    # Step 3: Install Instaloader
-    - name: Install Instaloader
-      run: |
-        python -m pip install --upgrade pip
-        pip install instaloader
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install apify-client requests
 
-    # Step 4: Run the Scraper
-    - name: Download Profile Media
-      run: |
-        # Base command for downloading a public profile
-        # --no-captions and --no-metadata-json are added to save space, remove them if you want text data
-        COMMAND="instaloader --no-captions --no-metadata-json"
-        
-        # Check if user wants reels included
-        if [ "${{ inputs.download_reels }}" = "true" ]; then
-          COMMAND="$COMMAND --reels --igtv"
-        fi
-        
-        # Execute the download command targeting the input username
-        $COMMAND "${{ inputs.target_username }}"
+      - name: Run archiver
+        id: archiver
+        env:
+          TARGET: ${{ github.event.inputs.target_username }}
+          MAX_POSTS: ${{ github.event.inputs.max_posts }}
+          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+        run: python archiver.py
 
-    # Step 5: Zip the downloaded content so it can be exported easily
-    - name: Zip Downloaded Content
-      run: |
-        zip -r instagram_media.zip "${{ inputs.target_username }}"/
+      - name: Commit and push
+        run: |
+          git config user.name "Instagram Archiver Bot"
+          git config user.email "actions@github.com"
+          git add instagram_archive/
+          if git diff --quiet --cached; then
+            echo "Nothing new to commit."
+          else
+            git commit -m "archive(@${{ github.event.inputs.target_username }}): $(date -u +%Y-%m-%d)"
+            git push
+          fi
 
-    # Step 6: Upload the files as a GitHub Artifact
-    - name: Upload Media Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ inputs.target_username }}-instagram-backup
-        path: instagram_media.zip
-        retention-days: 5
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ github.event.inputs.target_username }}-${{ github.run_id }}
+          path: instagram_archive/
+          retention-days: 30
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## Instagram Archive — @${{ github.event.inputs.target_username }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Posts processed | ${{ steps.archiver.outputs.posts_count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Files saved | ${{ steps.archiver.outputs.files_saved }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Errors | ${{ steps.archiver.outputs.errors }} |" >> $GITHUB_STEP_SUMMARY
