@@ -71,26 +71,34 @@ jobs:
           # --- Method 1: yt-dlp flat playlist ---
           echo ""
           echo "=== Method 1: yt-dlp ==="
+          # Create a Python script to avoid inline quoting issues
+          cat > /tmp/parse_ytdlp.py << 'PYEOF'
+          import sys, json
+          for line in sys.stdin:
+              line = line.strip()
+              if not line: continue
+              try:
+                  d = json.loads(line)
+                  c = d.get('id') or d.get('shortcode')
+                  if c: print(c)
+              except: pass
+          PYEOF
           YT_OPTS="--flat-playlist --dump-json --no-warnings --ignore-errors"
           if [ "$MAX_ITEMS" != "0" ]; then
             YT_OPTS="$YT_OPTS --playlist-end $MAX_ITEMS"
           fi
-          yt-dlp $YT_OPTS "https://www.instagram.com/$USERNAME/" 2>/dev/null | python3 -c "
-            import sys, json
-            for line in sys.stdin:
-                line = line.strip()
-                if not line: continue
-                try:
-                    d = json.loads(line)
-                    c = d.get('id') or d.get('shortcode')
-                    if c: print(c)
-                except: pass
-          " >> "$CODES_FILE" 2>/dev/null
+          yt-dlp $YT_OPTS "https://www.instagram.com/$USERNAME/" 2>/dev/null | python3 /tmp/parse_ytdlp.py >> "$CODES_FILE" 2>/dev/null
           echo "yt-dlp done: $(wc -l < $CODES_FILE) codes so far"
 
           # --- Method 2: Instaloader ---
           echo ""
           echo "=== Method 2: Instaloader ==="
+          cat > /tmp/parse_insta.py << 'PYEOF'
+          import sys, re
+          for line in sys.stdin:
+              for match in re.finditer(r'[A-Za-z0-9_-]{11,}', line):
+                  print(match.group(0))
+          PYEOF
           INSTA_OPTS="--no-pictures --no-videos --no-metadata-json --no-compress-json --quiet"
           if [ "$MAX_ITEMS" != "0" ]; then
             INSTA_OPTS="$INSTA_OPTS --count $MAX_ITEMS"
@@ -100,36 +108,32 @@ jobs:
           else
             instaloader $INSTA_OPTS --dirname-pattern="/tmp/insta_${USERNAME}" "$USERNAME" 2>/dev/null || true
           fi
-          find /tmp/insta_${USERNAME} -name "*.json" -exec cat {} \; 2>/dev/null | python3 -c "
-            import sys, json, re
-            for line in sys.stdin:
-                for match in re.finditer(r'[A-Za-z0-9_-]{11,}', line):
-                    print(match.group(0))
-          " >> "$CODES_FILE" 2>/dev/null || true
+          find /tmp/insta_${USERNAME} -name "*.json" -exec cat {} \; 2>/dev/null | python3 /tmp/parse_insta.py >> "$CODES_FILE" 2>/dev/null || true
           rm -rf /tmp/insta_${USERNAME} 2>/dev/null || true
           echo "Instaloader done: $(wc -l < $CODES_FILE) codes so far"
 
           # --- Method 3: Direct HTTP ---
           echo ""
           echo "=== Method 3: Direct HTTP ==="
-          python3 -c "
-            import urllib.request, re, json, sys, os
-            username = os.environ.get('USERNAME', '')
-            if not username: sys.exit(1)
-            url = f'https://www.instagram.com/{username}/'
-            req = urllib.request.Request(url, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-                'Accept': 'text/html',
-            })
-            try:
-                resp = urllib.request.urlopen(req, timeout=15)
-                text = resp.read().decode('utf-8', errors='replace')
-                codes = re.findall(r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]{11,})', text)
-                for c in sorted(set(codes)):
-                    print(c)
-            except Exception as e:
-                sys.exit(1)
-          " >> "$CODES_FILE" 2>/dev/null || true
+          cat > /tmp/direct_http.py << 'PYEOF'
+          import urllib.request, re, sys, os
+          username = os.environ.get('USERNAME', '')
+          if not username: sys.exit(1)
+          url = f'https://www.instagram.com/{username}/'
+          req = urllib.request.Request(url, headers={
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+              'Accept': 'text/html',
+          })
+          try:
+              resp = urllib.request.urlopen(req, timeout=15)
+              text = resp.read().decode('utf-8', errors='replace')
+              codes = re.findall(r'instagram\.com/(?:p|reel)/([A-Za-z0-9_-]{11,})', text)
+              for c in sorted(set(codes)):
+                  print(c)
+          except Exception as e:
+              sys.exit(1)
+          PYEOF
+          python3 /tmp/direct_http.py >> "$CODES_FILE" 2>/dev/null || true
           echo "Direct HTTP done: $(wc -l < $CODES_FILE) codes so far"
 
           # --- Deduplicate ---
@@ -209,31 +213,38 @@ jobs:
           USERNAME="${{ env.USERNAME }}"
           if [ ! -d "$USERNAME" ]; then exit 0; fi
 
-          python3 -c "
-            import os, json, datetime
-            username = os.environ['USERNAME']
-            post_count = len([f for f in os.listdir(os.path.join(username, 'posts')) if os.path.isfile(os.path.join(username, 'posts', f))]) if os.path.isdir(os.path.join(username, 'posts')) else 0
-            reel_count = len([f for f in os.listdir(os.path.join(username, 'reels')) if os.path.isfile(os.path.join(username, 'reels', f))]) if os.path.isdir(os.path.join(username, 'reels')) else 0
-            total_size = 0
-            for root, dirs, files in os.walk(username):
-                for f in files:
-                    if f in ('archive.txt', 'download_report.json'):
-                        continue
-                    path = os.path.join(root, f)
-                    total_size += os.path.getsize(path)
-            total_size_mb = round(total_size / (1024 * 1024), 2)
-            report = {
-                'username': username,
-                'date': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
-                'posts_downloaded': post_count,
-                'reels_downloaded': reel_count,
-                'total_items': post_count + reel_count,
-                'total_size_mb': total_size_mb,
-            }
-            with open(os.path.join(username, 'download_report.json'), 'w') as f:
-                json.dump(report, f, indent=2)
-            print(json.dumps(report, indent=2))
-          "
+          # Generate report with a safe heredoc Python script
+          python3 << 'PYEOF'
+          import os, json, datetime
+          username = os.environ['USERNAME']
+          post_count = 0
+          reel_count = 0
+          total_size = 0
+          posts_dir = os.path.join(username, 'posts')
+          reels_dir = os.path.join(username, 'reels')
+          if os.path.isdir(posts_dir):
+              post_count = len([f for f in os.listdir(posts_dir) if os.path.isfile(os.path.join(posts_dir, f))])
+          if os.path.isdir(reels_dir):
+              reel_count = len([f for f in os.listdir(reels_dir) if os.path.isfile(os.path.join(reels_dir, f))])
+          for root, dirs, files in os.walk(username):
+              for f in files:
+                  if f in ('archive.txt', 'download_report.json'):
+                      continue
+                  path = os.path.join(root, f)
+                  total_size += os.path.getsize(path)
+          total_size_mb = round(total_size / (1024 * 1024), 2)
+          report = {
+              'username': username,
+              'date': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+              'posts_downloaded': post_count,
+              'reels_downloaded': reel_count,
+              'total_items': post_count + reel_count,
+              'total_size_mb': total_size_mb,
+          }
+          with open(os.path.join(username, 'download_report.json'), 'w') as f:
+              json.dump(report, f, indent=2)
+          print(json.dumps(report, indent=2))
+          PYEOF
 
           echo ""
           echo "=========================================="
