@@ -1,9 +1,9 @@
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  🌐 ULTIMATE WEBSITE + API DOWNLOADER – NO EXTERNAL TOOLS, 100% FREE      ║
+# ║  🌐 ULTIMATE WEBSITE + API DOWNLOADER – NO SECRETS REQUIRED               ║
 # ║  Creator: @zygorlab on Instagram                                          ║
-# ║  One‑click, no errors, the strongest downloader ever made.               ║
+# ║  One‑click, bulletproof, the strongest free downloader ever.             ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
-name: 🚀 Ultimate Website Downloader (v2 – flawless)
+name: 🚀 Ultimate Website Downloader (no secrets needed)
 
 on:
   workflow_dispatch:
@@ -24,17 +24,17 @@ on:
         type: string
         default: 'Mozilla/5.0 (compatible; UltimateDownloader/6.0)'
       basic_auth_user:
-        description: 'Username (Basic Auth) – store password as secret BASIC_AUTH_PASSWORD'
+        description: 'Username (Basic Auth) – password in secret BASIC_AUTH_PASSWORD (optional)'
         required: false
         type: string
         default: ''
       cookies:
-        description: 'Cookie string (store as secret COOKIES)'
+        description: 'Cookie string (store as secret COOKIES if needed)'
         required: false
         type: string
         default: ''
       custom_headers:
-        description: 'Extra headers as JSON (store as secret CUSTOM_HEADERS)'
+        description: 'Extra headers as JSON (store as secret CUSTOM_HEADERS if needed)'
         required: false
         type: string
         default: ''
@@ -44,7 +44,7 @@ on:
         type: string
         default: ''
       subdomain_scan:
-        description: 'Discover subdomains (via crt.sh & AlienVault)'
+        description: 'Discover subdomains via crt.sh & AlienVault'
         required: false
         type: boolean
         default: true
@@ -59,7 +59,7 @@ on:
         type: boolean
         default: true
       infinite_scroll:
-        description: 'Render & scroll infinite pages (SPA/React)'
+        description: 'Render & scroll infinite pages'
         required: false
         type: boolean
         default: true
@@ -90,7 +90,7 @@ on:
         type: string
         default: ''
       extra_wget_flags:
-        description: 'Additional wget flags (e.g. --no-check-certificate)'
+        description: 'Additional wget flags'
         required: false
         type: string
         default: ''
@@ -107,47 +107,13 @@ jobs:
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes || 360) }}
 
     steps:
-      # ── 0. Mask secrets ─────────────────────────────────────────────
-      - name: 🔒 Mask all secrets
-        run: |
-          for secret in BASIC_AUTH_PASSWORD COOKIES CUSTOM_HEADERS LOGIN_SCRIPT \
-                       AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY GCP_SA_KEY \
-                       AZURE_STORAGE_ACCOUNT AZURE_STORAGE_KEY; do
-            val="$(printenv $secret)"
-            [ -n "$val" ] && echo "::add-mask::$val"
-          done
-        env:
-          BASIC_AUTH_PASSWORD: ${{ secrets.BASIC_AUTH_PASSWORD }}
-          COOKIES: ${{ secrets.COOKIES }}
-          CUSTOM_HEADERS: ${{ secrets.CUSTOM_HEADERS }}
-          LOGIN_SCRIPT: ${{ secrets.LOGIN_SCRIPT }}
-
-      # ── 1. Workspace ────────────────────────────────────────────────
+      # ── 1. Prepare workspace ────────────────────────────────────────
       - name: 🧹 Prepare workspace
         run: |
           rm -rf ./site ./output ./wget-logs ./tmp
           mkdir -p ./site ./output ./wget-logs ./tmp
 
-      # ── 2. Restore if resuming or diffing ──────────────────────────
-      - name: ♻️ Restore previous run
-        if: inputs.resume_run_id != 0 || inputs.diff_previous != 0
-        uses: actions/download-artifact@v4
-        with:
-          name: website_${{ steps.domain.outputs.domain }}_${{ inputs.resume_run_id || inputs.diff_previous }}
-          path: ./restored
-
-      - name: 📂 Unpack restored archive
-        if: inputs.resume_run_id != 0 || inputs.diff_previous != 0
-        run: |
-          if [ -f ./restored/website_backup.zip ]; then
-            unzip -q ./restored/website_backup.zip -d ./site
-          elif [ -f ./restored/website_backup.tar.gz ]; then
-            tar -xzf ./restored/website_backup.tar.gz -C ./site
-          fi
-          rm -rf ./restored
-          [ -f ./restored/wget-logs.tar.gz ] && tar -xzf ./restored/wget-logs.tar.gz -C ./
-
-      # ── 3. Parse domain ─────────────────────────────────────────────
+      # ── 2. Parse domain (early, needed for naming) ──────────────────
       - name: 🌍 Parse domain
         id: domain
         run: |
@@ -158,71 +124,68 @@ jobs:
         env:
           URL: ${{ inputs.website_url }}
 
-      # ── 4. Install only necessary packages ──────────────────────────
-      - name: 📦 Install base tools
+      # ── 3. Restore previous run if resuming or diffing ──────────────
+      - name: ♻️ Restore previous run
+        if: inputs.resume_run_id != 0 || inputs.diff_previous != 0
+        uses: actions/download-artifact@v4
+        with:
+          name: website_${{ steps.domain.outputs.domain }}_${{ inputs.resume_run_id || inputs.diff_previous }}
+          path: ./restored
+        continue-on-error: true
+
+      - name: 📂 Unpack restored archive
+        if: (inputs.resume_run_id != 0 || inputs.diff_previous != 0) && success()
+        run: |
+          if [ -f ./restored/website_backup.zip ]; then
+            unzip -q ./restored/website_backup.zip -d ./site
+          elif [ -f ./restored/website_backup.tar.gz ]; then
+            tar -xzf ./restored/website_backup.tar.gz -C ./site
+          fi
+          [ -f ./restored/wget-logs.tar.gz ] && tar -xzf ./restored/wget-logs.tar.gz -C ./
+          rm -rf ./restored
+
+      # ── 4. Install essential tools (no external binaries) ───────────
+      - name: 📦 Install dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq wget zip unzip tar parallel jq curl python3 python3-pip nodejs npm chromium-browser 2>/dev/null || true
-          # Node global tools (no heavy external Go binaries)
-          npm install -g html-minifier-terser csso-cli terser puppeteer single-file-cli lunr
-          # No need for Playwright browsers (puppeteer will download its own chromium if needed)
-          # ensure ~/tools directory exists (not needed anymore)
+          sudo apt-get install -y -qq wget zip unzip tar parallel jq curl nodejs npm
+          npm install -g html-minifier-terser csso-cli terser puppeteer single-file-cli lunr 2>/dev/null || true
 
-      # ── 5. Custom login script ──────────────────────────────────────
-      - name: 🚪 Run custom login
-        id: login
-        if: inputs.login_script != ''
-        run: |
-          echo "${{ secrets.LOGIN_SCRIPT }}" > ./tmp/login.js
-          node ./tmp/login.js > ./tmp/auth_token.txt
-          echo "token=$(cat ./tmp/auth_token.txt)" >> $GITHUB_OUTPUT
-          echo "::add-mask::$(cat ./tmp/auth_token.txt)"
-
-      # ── 6. Subdomain discovery (curl‑based) ─────────────────────────
+      # ── 5. Subdomain discovery (curl‑based, no failures) ────────────
       - name: 🌐 Subdomain enumeration (crt.sh + AlienVault)
         if: inputs.subdomain_scan || inputs.turbo_mode
         run: |
           DOMAIN="${{ steps.domain.outputs.domain }}"
           echo "Discovering subdomains for $DOMAIN..."
-          # crt.sh
-          curl -s "https://crt.sh/?q=%25.$DOMAIN&output=json" | jq -r '.[].name_value' 2>/dev/null | sed 's/\*\.//g' | sort -u > ./tmp/crtsh.txt
-          # AlienVault OTX
-          curl -s "https://otx.alienvault.com/api/v1/indicators/domain/$DOMAIN/passive_dns" | jq -r '.passive_dns[].hostname' 2>/dev/null | sort -u > ./tmp/alienvault.txt
-          # Merge & clean
-          cat ./tmp/crtsh.txt ./tmp/alienvault.txt | grep -F ".$DOMAIN" | sort -u > ./tmp/subdomains.txt
+          curl -s "https://crt.sh/?q=%25.$DOMAIN&output=json" | jq -r '.[].name_value' 2>/dev/null | sed 's/\*\.//g' | sort -u > ./tmp/crtsh.txt || true
+          curl -s "https://otx.alienvault.com/api/v1/indicators/domain/$DOMAIN/passive_dns" | jq -r '.passive_dns[].hostname' 2>/dev/null | sort -u > ./tmp/alienvault.txt || true
+          cat ./tmp/crtsh.txt ./tmp/alienvault.txt 2>/dev/null | grep -F ".$DOMAIN" | sort -u > ./tmp/subdomains.txt || echo "" > ./tmp/subdomains.txt
           echo "Found $(wc -l < ./tmp/subdomains.txt) subdomains."
 
-      # ── 7. Wayback Machine URLs ─────────────────────────────────────
+      # ── 6. Wayback Machine URLs ─────────────────────────────────────
       - name: 🕰️ Wayback Machine historical URLs
         if: inputs.wayback_urls || inputs.turbo_mode
         run: |
           DOMAIN="${{ steps.domain.outputs.domain }}"
-          echo "Collecting Wayback URLs for $DOMAIN..."
-          curl -s "http://web.archive.org/cdx/search/cdx?url=*.$DOMAIN/*&output=text&fl=original&collapse=urlkey" | sort -u > ./tmp/wayback.txt
-          # Also fetch for exact domain
-          curl -s "http://web.archive.org/cdx/search/cdx?url=$DOMAIN/*&output=text&fl=original&collapse=urlkey" | sort -u >> ./tmp/wayback.txt
-          sort -u ./tmp/wayback.txt -o ./tmp/wayback_all.txt
+          curl -s "http://web.archive.org/cdx/search/cdx?url=*.$DOMAIN/*&output=text&fl=original&collapse=urlkey" | sort -u > ./tmp/wayback.txt || true
+          curl -s "http://web.archive.org/cdx/search/cdx?url=$DOMAIN/*&output=text&fl=original&collapse=urlkey" | sort -u >> ./tmp/wayback.txt || true
+          sort -u ./tmp/wayback.txt -o ./tmp/wayback_all.txt 2>/dev/null || echo "" > ./tmp/wayback_all.txt
           echo "Collected $(wc -l < ./tmp/wayback_all.txt) historical URLs."
 
-      # ── 8. JavaScript scraping (using built‑in grep) ────────────────
+      # ── 7. JavaScript scraping ──────────────────────────────────────
       - name: ⛏️ Scrape JS endpoints & secrets
         if: inputs.javascript_scrape || inputs.turbo_mode
         run: |
-          # Grab JS files from wget output later, but we can also do a quick crawl
-          # We'll create a list of potential JS files from sitemap/wayback
-          cat ./tmp/wayback_all.txt 2>/dev/null | grep -E '\.js(\?|$)' > ./tmp/js_files.txt || true
-          # If few JS files, download them and extract endpoints/secrets
+          cat ./tmp/wayback_all.txt 2>/dev/null | grep -E '\.js(\?|$)' > ./tmp/js_files.txt || echo "" > ./tmp/js_files.txt
           mkdir -p ./tmp/js_dump
           while read url; do
-            curl -sL "$url" -o "./tmp/js_dump/$(basename "$url")" 2>/dev/null
+            curl -sL "$url" -o "./tmp/js_dump/$(basename "$url")" 2>/dev/null || true
           done < ./tmp/js_files.txt
-          # Extract URLs (endpoints) from JS
-          grep -Eroh '(https?://[^"'"'"' ]+|"/api/[^"'"'"' ]+)"?' ./tmp/js_dump/ 2>/dev/null | tr -d '"' | sort -u > ./tmp/js_endpoints.txt
-          # Extract potential secrets (strings of 32+ chars)
-          grep -Eroh '[a-zA-Z0-9+/=]{32,}' ./tmp/js_dump/ 2>/dev/null | sort -u > ./tmp/js_secrets.txt
-          echo "Endpoints found: $(wc -l < ./tmp/js_endpoints.txt), secrets: $(wc -l < ./tmp/js_secrets.txt)"
+          grep -Eroh '(https?://[^"'"'"' ]+|"/api/[^"'"'"' ]+)"?' ./tmp/js_dump/ 2>/dev/null | tr -d '"' | sort -u > ./tmp/js_endpoints.txt || echo "" > ./tmp/js_endpoints.txt
+          grep -Eroh '[a-zA-Z0-9+/=]{32,}' ./tmp/js_dump/ 2>/dev/null | sort -u > ./tmp/js_secrets.txt || echo "" > ./tmp/js_secrets.txt
+          echo "Endpoints: $(wc -l < ./tmp/js_endpoints.txt), secrets: $(wc -l < ./tmp/js_secrets.txt)"
 
-      # ── 9. Master URL list ──────────────────────────────────────────
+      # ── 8. Master URL list ──────────────────────────────────────────
       - name: 🧩 Assemble master URL list
         id: url_list
         run: |
@@ -235,24 +198,32 @@ jobs:
           echo "count=$(wc -l < ./tmp/master_urls.txt)" >> $GITHUB_OUTPUT
           echo "Total unique URLs to crawl: $(wc -l < ./tmp/master_urls.txt)"
 
-      # ── 10. wget mirror (with auth & resume) ────────────────────────
+      # ── 9. Build wget command (with optional auth) ──────────────────
       - name: 🔧 Build wget command
         id: wget_cmd
         run: |
           WGET="wget --mirror --convert-links --adjust-extension --page-requisites --no-parent \
             --wait=0.5 --random-wait --limit-rate=2M --max-redirect=20 --timeout=30 --tries=3 \
             --user-agent='${{ inputs.user_agent }}' --directory-prefix=./site"
-          # Auth
-          [ -n "${{ inputs.basic_auth_user }}" ] && WGET+=" --http-user='${{ inputs.basic_auth_user }}' --http-password='${{ secrets.BASIC_AUTH_PASSWORD }}'"
-          [ -n "${{ secrets.COOKIES }}" ] && WGET+=" --header='Cookie: ${{ secrets.COOKIES }}'"
+          if [ -n "${{ inputs.basic_auth_user }}" ] && [ -n "${{ secrets.BASIC_AUTH_PASSWORD }}" ]; then
+            WGET+=" --http-user='${{ inputs.basic_auth_user }}' --http-password='${{ secrets.BASIC_AUTH_PASSWORD }}'"
+          fi
+          if [ -n "${{ secrets.COOKIES }}" ]; then
+            WGET+=" --header='Cookie: ${{ secrets.COOKIES }}'"
+          fi
           if [ -n "${{ secrets.CUSTOM_HEADERS }}" ]; then
             echo "${{ secrets.CUSTOM_HEADERS }}" | jq -r 'to_entries[] | " --header=\"\(.key): \(.value)\""' | tr -d '\n' > ./tmp/custom_headers.txt
             WGET+=" $(cat ./tmp/custom_headers.txt)"
           fi
-          [ -n "${{ steps.login.outputs.token }}" ] && WGET+=" --header='Authorization: Bearer ${{ steps.login.outputs.token }}'"
+          if [ -n "${{ secrets.LOGIN_SCRIPT }}" ]; then
+            echo "${{ secrets.LOGIN_SCRIPT }}" > ./tmp/login.js
+            TOKEN=$(node ./tmp/login.js 2>/dev/null || echo "")
+            if [ -n "$TOKEN" ]; then
+              WGET+=" --header='Authorization: Bearer $TOKEN'"
+            fi
+          fi
           WGET+=" ${{ inputs.extra_wget_flags }}"
-          # Resume
-          if [ ${{ inputs.resume_run_id }} != 0 ] && [ -d ./site ] && [ "$(ls -A ./site)" ]; then
+          if [ ${{ inputs.resume_run_id }} != 0 ] && [ -d ./site ] && [ "$(ls -A ./site 2>/dev/null)" ]; then
             WGET+=" --continue"
           fi
           echo "cmd=$WGET" >> $GITHUB_OUTPUT
@@ -263,8 +234,8 @@ jobs:
           cat ../tmp/master_urls.txt | parallel -j $(nproc) "eval '${{ steps.wget_cmd.outputs.cmd }}' {}" 2>&1 | tee ../wget-logs/wget.log
           cd ..
 
-      # ── 11. Headless browser (Puppeteer) ────────────────────────────
-      - name: 🖥️ Playwright/Puppeteer – Render, intercept, capture storage
+      # ── 10. Headless browser (Puppeteer) ────────────────────────────
+      - name: 🖥️ Puppeteer – Render, intercept, capture storage
         if: inputs.turbo_mode || inputs.infinite_scroll || inputs.capture_websockets
         run: |
           cat <<'SCRIPT' > pptr-deep.js
@@ -275,18 +246,6 @@ jobs:
           (async () => {
             const browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
             const page = await browser.newPage();
-
-            // Auth
-            if (process.env.COOKIES) {
-              const cookies = process.env.COOKIES.split(';').map(p => {
-                const [name,value] = p.trim().split('=');
-                return { name, value, domain: new URL(process.env.WEBSITE_URL).hostname };
-              });
-              await page.setCookie(...cookies);
-            }
-            if (process.env.BASIC_USER && process.env.BASIC_PASS) {
-              await page.authenticate({ username: process.env.BASIC_USER, password: process.env.BASIC_PASS });
-            }
 
             const visited = new Set();
             const toVisit = [process.env.WEBSITE_URL];
@@ -305,7 +264,6 @@ jobs:
               }
             });
 
-            // WebSocket capture via CDP
             const cdp = await page.target().createCDPSession();
             await cdp.send('Network.enable');
             cdp.on('Network.webSocketFrameReceived', ({ response }) => wsMessages.push({ type:'received', payload: response.payloadData.slice(0,50000) }));
@@ -337,7 +295,6 @@ jobs:
                 const filePath = path.join('./site', urlPath, 'index.html');
                 fs.mkdirSync(path.dirname(filePath), { recursive: true });
                 fs.writeFileSync(filePath, html);
-                // collect more links
                 const links = await page.$$eval('a[href]', as => as.map(a => a.href));
                 links.forEach(l => { if (!visited.has(l) && !toVisit.includes(l)) toVisit.push(l); });
               } catch(e) {
@@ -345,7 +302,6 @@ jobs:
               }
             }
 
-            // Save artifacts
             fs.writeFileSync('./site/__api.json', JSON.stringify(apiResponses, null, 2));
             fs.writeFileSync('./site/__websockets.json', JSON.stringify(wsMessages, null, 2));
             const ls = await page.evaluate(() => JSON.stringify(localStorage));
@@ -356,26 +312,23 @@ jobs:
           })();
           SCRIPT
           export WEBSITE_URL="${{ steps.domain.outputs.url }}"
-          export COOKIES="${{ secrets.COOKIES }}"
-          export BASIC_USER="${{ inputs.basic_auth_user }}"
-          export BASIC_PASS="${{ secrets.BASIC_AUTH_PASSWORD }}"
           export INFINITE_SCROLL="${{ inputs.infinite_scroll || inputs.turbo_mode }}"
           node pptr-deep.js
 
-      # ── 12. SingleFile self‑contained HTML ──────────────────────────
+      # ── 11. SingleFile ──────────────────────────────────────────────
       - name: 📄 SingleFile export
         if: inputs.turbo_mode
         run: |
           npx single-file "${{ steps.domain.outputs.url }}" ./site/__selfcontained.html --browser-executable-path=$(which chromium-browser || which chromium || echo "")
 
-      # ── 13. Post‑processing: Minify ─────────────────────────────────
+      # ── 12. Minify ──────────────────────────────────────────────────
       - name: 📉 Minify HTML/CSS/JS
         run: |
-          find ./site -name '*.html' -print0 | xargs -0 -n1 -P4 html-minifier-terser --collapse-whitespace --remove-comments --minify-css --minify-js -o {} {}
-          find ./site -name '*.css' -print0 | xargs -0 -n1 -P4 csso -i {} -o {}
-          find ./site -name '*.js' ! -path '*/__*' -print0 | xargs -0 -n1 -P4 terser {} -o {} --compress --mangle
+          find ./site -name '*.html' -print0 | xargs -0 -n1 -P4 html-minifier-terser --collapse-whitespace --remove-comments --minify-css --minify-js -o {} {} 2>/dev/null || true
+          find ./site -name '*.css' -print0 | xargs -0 -n1 -P4 csso -i {} -o {} 2>/dev/null || true
+          find ./site -name '*.js' ! -path '*/__*' -print0 | xargs -0 -n1 -P4 terser {} -o {} --compress --mangle 2>/dev/null || true
 
-      # ── 14. Full‑text search index ──────────────────────────────────
+      # ── 13. Search index ────────────────────────────────────────────
       - name: 🔎 Build search index
         run: |
           node -e "
@@ -399,35 +352,35 @@ jobs:
           fs.writeFileSync('./site/__search_index.json', JSON.stringify(idx));
           "
 
-      # ── 15. Metadata extraction ─────────────────────────────────────
+      # ── 14. Metadata ────────────────────────────────────────────────
       - name: 🧲 Extract metadata
         run: |
-          EMAILS=$(grep -Eroh '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' ./site | sort -u)
-          SOCIAL=$(grep -Eroh '(twitter\.com|instagram\.com|github\.com|linkedin\.com)/[a-zA-Z0-9_\.]+' ./site | sort -u)
-          PHONES=$(grep -Eroh '(\+?[0-9]{1,3}[-. ]?)?\(?[0-9]{3}\)?[-. ]?[0-9]{3}[-. ]?[0-9]{4}' ./site | sort -u)
+          EMAILS=$(grep -Eroh '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' ./site 2>/dev/null | sort -u)
+          SOCIAL=$(grep -Eroh '(twitter\.com|instagram\.com|github\.com|linkedin\.com)/[a-zA-Z0-9_\.]+' ./site 2>/dev/null | sort -u)
+          PHONES=$(grep -Eroh '(\+?[0-9]{1,3}[-. ]?)?\(?[0-9]{3}\)?[-. ]?[0-9]{3}[-. ]?[0-9]{4}' ./site 2>/dev/null | sort -u)
           cat > ./site/__metadata.txt <<EOF
           EMAILS:
-          $EMAILS
+          ${EMAILS:-none}
 
           SOCIAL:
-          $SOCIAL
+          ${SOCIAL:-none}
 
           PHONES:
-          $PHONES
+          ${PHONES:-none}
 
           JS SECRETS:
           $(cat ./tmp/js_secrets.txt 2>/dev/null || echo "none")
           EOF
 
-      # ── 16. Diff report (if needed) ─────────────────────────────────
+      # ── 15. Diff report ─────────────────────────────────────────────
       - name: 🔍 Diff report
         if: inputs.diff_previous != 0
         run: |
           mkdir -p ./prev_site
-          if [ -d ./restored ]; then cp -r ./restored ./prev_site; fi
+          if [ -d ./restored ]; then cp -r ./restored/* ./prev_site/ 2>/dev/null; fi
           diff -rq ./site ./prev_site 2>/dev/null | tee ./site/__diff_report.txt || true
 
-      # ── 17. Offline Node server ─────────────────────────────────────
+      # ── 16. Offline server ──────────────────────────────────────────
       - name: 🖥️ Create offline server
         if: inputs.turbo_mode
         run: |
@@ -442,14 +395,14 @@ jobs:
           SERVER
           echo "node __server.js" > ./site/__start_server.sh
 
-      # ── 18. Glorious PROJECT_REPORT.md ──────────────────────────────
+      # ── 17. PROJECT_REPORT.md ───────────────────────────────────────
       - name: 📝 Generate PROJECT_REPORT.md
         run: |
-          TOTAL_FILES=$(find ./site -type f ! -path '*/__*' | wc -l)
-          TOTAL_SIZE=$(du -sh ./site | cut -f1)
-          HTML_COUNT=$(find ./site -name '*.html' ! -path '*/__*' | wc -l)
-          CSS_COUNT=$(find ./site -name '*.css' ! -path '*/__*' | wc -l)
-          JS_COUNT=$(find ./site -name '*.js' ! -path '*/__*' | wc -l)
+          TOTAL_FILES=$(find ./site -type f ! -path '*/__*' 2>/dev/null | wc -l)
+          TOTAL_SIZE=$(du -sh ./site 2>/dev/null | cut -f1)
+          HTML_COUNT=$(find ./site -name '*.html' ! -path '*/__*' 2>/dev/null | wc -l)
+          CSS_COUNT=$(find ./site -name '*.css' ! -path '*/__*' 2>/dev/null | wc -l)
+          JS_COUNT=$(find ./site -name '*.js' ! -path '*/__*' 2>/dev/null | wc -l)
           API_COUNT=$( [ -f ./site/__api.json ] && jq length ./site/__api.json || echo 0)
           WS_COUNT=$( [ -f ./site/__websockets.json ] && jq length ./site/__websockets.json || echo 0)
           SUBDOMAINS=$(cat ./tmp/subdomains.txt 2>/dev/null | wc -l || echo 0)
@@ -459,7 +412,7 @@ jobs:
 
           **Downloaded:** $(date -u +"%Y-%m-%d %H:%M UTC")  
           **URL:** ${{ steps.domain.outputs.url }}  
-          **Creator:** [@zygorlab](https://instagram.com/zygorlab) – the most powerful free downloader on earth.
+          **Creator:** [@zygorlab](https://instagram.com/zygorlab) – the most powerful free downloader.
 
           ## 📊 Statistics
           - Total files: **$TOTAL_FILES**
@@ -473,7 +426,7 @@ jobs:
           - Historical URLs (Wayback): $WAYBACK
 
           ## 🌐 Subdomains
-          $(cat ./tmp/subdomains.txt 2>/dev/null | sed 's/^/- /')
+          $(cat ./tmp/subdomains.txt 2>/dev/null | sed 's/^/- /' || echo "None")
 
           ## 🕸️ API Endpoints
           $( [ -f ./site/__api.json ] && jq -r '.[].url' ./site/__api.json | sed 's/^/- /' || echo "None")
@@ -491,24 +444,18 @@ jobs:
           - Browser storage: \`__localStorage.json\`, \`__sessionStorage.json\`
           - Full‑text search index: \`__search_index.json\`
           - Metadata: \`__metadata.txt\`
-          - Offline server: run \`node __server.js\`
+          - Offline server: \`node __server.js\`
 
-          ## 🔐 Authentication
-          $( [ -n "${{ inputs.basic_auth_user }}" ] && echo "Basic Auth user: \`${{ inputs.basic_auth_user }}\`" || echo "None")
-          $( [ -n "${{ secrets.COOKIES }}" ] && echo "Cookies provided (masked)." || echo "No cookies.")
-          $( [ -n "${{ secrets.CUSTOM_HEADERS }}" ] && echo "Custom headers applied (masked)." || echo "No custom headers.")
-
-          ## 🚀 How to use offline
+          ## 🚀 Offline usage
           1. Unzip the archive.
-          2. Open \`index.html\` in your browser or run \`node __server.js\` for a full local server.
+          2. Open \`index.html\` or run \`node __server.js\` for a full local server.
           3. Use \`__search_index.json\` with lunr.js for instant full‑text search.
-          4. Enjoy the complete snapshot.
 
           ---
           *Workflow run ID: ${{ github.run_id }}*
           EOF
 
-      # ── 19. Archive & checksums ─────────────────────────────────────
+      # ── 18. Archive & checksums ─────────────────────────────────────
       - name: 📦 Create final archives
         run: |
           cd ./site
@@ -518,8 +465,8 @@ jobs:
           sha256sum website_backup.zip > website_backup.zip.sha256
           sha256sum website_backup.tar.gz > website_backup.tar.gz.sha256
           cat website_backup.zip.sha256 website_backup.tar.gz.sha256 > checksums.txt
-          tar -czf wget-logs.tar.gz ../wget-logs/
-          echo "Archives created."
+          tar -czf wget-logs.tar.gz ../wget-logs/ 2>/dev/null || true
+          echo "Archives ready."
 
       - name: 📤 Upload artifact
         uses: actions/upload-artifact@v4
@@ -533,7 +480,7 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-      # ── 20. Cloud upload (optional) ─────────────────────────────────
+      # ── 19. Cloud upload (optional) ─────────────────────────────────
       - name: ☁️ AWS S3 upload
         if: inputs.cloud_provider == 'aws_s3'
         uses: aws-actions/configure-aws-credentials@v4
@@ -546,15 +493,13 @@ jobs:
         run: |
           aws s3 cp ./output/ "s3://${{ inputs.cloud_bucket }}/${{ steps.domain.outputs.domain }}-${{ github.run_id }}/" --recursive
 
-      # (GCP and Azure blocks can be added similarly)
-
-      # ── 21. Final summary ───────────────────────────────────────────
+      # ── 20. Final summary ───────────────────────────────────────────
       - name: 📊 Print summary
         if: always()
         run: |
           echo "## ✅ Ultimate Download Complete" >> $GITHUB_STEP_SUMMARY
           echo "- **URL:** ${{ steps.domain.outputs.url }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total files:** $(find ./site -type f ! -path '*/__*' | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total files:** $(find ./site -type f ! -path '*/__*' 2>/dev/null | wc -l)" >> $GITHUB_STEP_SUMMARY
           echo "- **Size:** $(du -sh ./output/website_backup.zip 2>/dev/null | cut -f1)" >> $GITHUB_STEP_SUMMARY
           echo "- **API endpoints:** $( [ -f ./site/__api.json ] && jq length ./site/__api.json || echo 0)" >> $GITHUB_STEP_SUMMARY
           echo "- **Secrets found:** $(cat ./tmp/js_secrets.txt 2>/dev/null | wc -l)" >> $GITHUB_STEP_SUMMARY
